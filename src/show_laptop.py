@@ -8,7 +8,6 @@ See LICENSE.md file in the project root for full license information.
 import time
 import sys
 from threading import Thread
-from time import sleep
 import argparse
 import numpy as np
 from drivers.rpi import Rate
@@ -162,10 +161,9 @@ class ShowLaptop(QWidget):
         # using -1 to span through all rows available in the window
         #layout.addWidget(self.rpmplot, 2, 0, -1, 3)
         
-        self.ST = timestamp = time.time()   
+        self.ST = time.time()
         self.lastimu = 0
         self.lastARUCO = 0
-        self.lastdepth = 0
         self._lidar_timestamp_s_prev = None
         self._map_x = []
         self._map_y = []
@@ -305,7 +303,7 @@ class ShowLaptop(QWidget):
         self.virtual_collision_position.cb_set_data(northings, eastings)
 
     def _update_lidar_plot(self, lidar_cloud_ne):
-        lidar_timestamp_s = getattr(self.Laptop, "latest_lidar_received_s", None)
+        lidar_timestamp_s = self.Laptop.lidar_timestamp_s
         if lidar_cloud_ne is None or lidar_timestamp_s == self._lidar_timestamp_s_prev:
             return
 
@@ -341,13 +339,13 @@ class ShowLaptop(QWidget):
         """Run control and visualization updates at the configured rate."""
         while self.running:
                     
-            right_rate, left_rate, lastdt, current_heading, North, East, sensed_yaw_rate, sensed_yaw, imu_time1, sensed_pos_northings_m, sensed_pos_eastings_m, sensed_pos_yaw_rad, ARUCO_time1, Waypoints, reference_path, depth, depth_time1, mission_complete, lidar_cloud_ne = self.Laptop.loop()
-            if self.loopcounter == 0 and Waypoints != None:
-                for i in range(len(Waypoints)):
-                    self.WP.cb_append_data_point(Waypoints[i].y, Waypoints[i].x)
+            right_rate, left_rate, lastdt, current_heading, North, East, sensed_yaw, imu_time1, sensed_pos_northings_m, sensed_pos_eastings_m, sensed_pos_yaw_rad, ARUCO_time1, depth, depth_time1, lidar_cloud_ne = self.Laptop.loop()
+            if self.loopcounter == 0:
+                for waypoint in self.Laptop.waypoints:
+                    self.WP.cb_append_data_point(waypoint.y, waypoint.x)
                 self.planned_path.cb_set_data(
-                    [waypoint.y for waypoint in Waypoints],
-                    [waypoint.x for waypoint in Waypoints],
+                    [waypoint.y for waypoint in self.Laptop.waypoints],
+                    [waypoint.x for waypoint in self.Laptop.waypoints],
                 )
             self.loopcounter = self.loopcounter + 1            
             self.TFS = time.time() - self.ST
@@ -402,11 +400,6 @@ class ShowLaptop(QWidget):
                 self.lastimu = imu_time
             if ARUCO_time != None:
                 self.lastARUCO = ARUCO_time 
-            if depth_time != None and depth_time >= self.TFS - lastdt:
-                self.lastdepth = depth_time               
-            
-            self.ET = timestamp = time.time()
-
             self.r.sleep()
             
     def breaker(self):
