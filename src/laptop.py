@@ -8,19 +8,33 @@ See LICENSE.md file in the project root for full license information.
 
 import numpy as np
 import json
+import os
+from datetime import datetime
 import time
 from pathlib import Path
+import subprocess
+import platform
+import copy
 
 from zeroros import Publisher, Subscriber
-from zeroros.messages import String, Vector3, PoseStamped, RBLaserScan
+from zeroros.messages import String, Vector3, Vector3Stamped, Pose, PoseStamped, RBLaserScan
+from zeroros.datalogger import DataLogger
 
 from drivers.aruco import ArUcoUDPDriver
 from drivers.rpi import Console, Rate
+from drivers import __version__
 from scipy.spatial.transform import Rotation as R
+
+# ---------------- LiDAR + DBSCAN imports ----------------
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", "1")
 from sklearn.cluster import DBSCAN
 
-from model_sess6072 import TAM, Vehicle2D_e, dynamics_translation_e, dynamics_rotation_e
-from math_sess6072 import l2m
+from model_sess6072 import TAM, Vehicle2D_e, dynamics_translation_e, dynamics_rotation_e, TrajectoryGenerate, RangeAngleKinematics
+from math_sess6072 import l2m, HomogeneousTransformation, Vector, HomogeneousTransformation, Matrix, Identity
+from model_sess6072 import rigid_body_kinematics # tried to remove <existing libraries>
+from math_sess6072 import Inverse, Vector # tried to remove <existing libraries>
+
+# enter additional library imports here
 
 # define global variables 
 N = 0
@@ -35,29 +49,116 @@ DOTG = 5
 # False: use current LiDAR obstacles only; disable EKF tracking, CPA, and prediction.
 ENABLE_OBSTACLE_EKF_PREDICTION = True
 
+# APF influence-range source switch.
+# True: scale the field from each DBSCAN cluster's pc1/pc2 dimensions.
+# False: ignore cluster dimensions and use the classical APF distance Q*.
+ENABLE_CLUSTER_BASED_APF_RANGE = True
+CLASSIC_APF_INFLUENCE_DISTANCE_M = 5.0
+
+
+# define global functions
+def get_wifi_name():
+    result = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True, text=True)
+    for line in result.stdout.split("\n"):
+        if "SSID" in line and "BSSID" not in line:
+            return line.split(":")[1].strip()
+    return 0
 
 def Vector(dim): return np.zeros((dim, 1), dtype=float)
 
 def rpm2N(x, fwd_lim = 2000, rev_lim = -2000): 
-    x = float(np.clip(x, rev_lim, fwd_lim))
     tol = 10
-    if abs(x) <= tol:
-        return 0.0
-    if x > tol:
-        return 1.54157142857143e-7*x**2 + 3.293357142857142e-4*x - 1.401428571428425e-3
-    return -7.3575e-8*x**2 + 1.71675e-4*x - 1.054478382732366e-16
+    if x>fwd_lim: x=fwd_lim
+    if x<rev_lim: x=rev_lim
+    if abs(x) <= tol: return 0
+    elif x>tol: return 1.541571428571430076E-7*x**2+3.293357142857142252E-4*x-1.401428571428424679E-3
+    else: return -7.35749999999999954E-8*x**2+1.716749999999999581E-4*x-1.054478382732365536E-16
 
 def N2rpm(x, fwd_lim = 1.2753, rev_lim = -0.63765): 
-    x = float(np.clip(x, rev_lim, fwd_lim))
-    if abs(x) <= 1e-3:
-        return 0.0
-    if x > 0:
-        return -572.7416623043567*x**2 + 2268.233085499709*x + 29.58718669408357
-    return 2397.948698765132*x**2 + 4665.568885752374*x + 6.685183692128884e-14
+    tol = 10E-4
+    if x>fwd_lim: x=fwd_lim
+    if x<rev_lim: x=rev_lim    
+    if abs(x) <= tol: return 0
+    elif x>tol: return -5.727416623043567370E2*x**2+2.268233085499708977E3*x+2.958718669408357371E1
+    else: return 2.397948698765131667E3*x**2+4.665568885752373717E3*x - -6.685183692128883879E-14
 
 # Keep heading errors continuous for route tracking.
 def wrap_angle(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
+
+def cluster_principal_dimensions(points, min_pc1_m, min_pc2_m):
+    points = np.asarray(points, dtype=float).reshape(-1, 2)
+    centre = np.mean(points, axis=0)
+    relative = points - centre
+
+    if len(points) < 2 or np.allclose(relative, 0.0):
+        return centre, float(min_pc1_m), float(min_pc2_m), np.array([1.0, 0.0])
+
+    covariance = relative.T @ relative / max(len(relative), 1)
+    _, eigenvectors = np.linalg.eigh(covariance)
+    length_axis = eigenvectors[:, -1]
+    if length_axis[0] < 0.0:
+        length_axis = -length_axis
+    width_axis = np.array([-length_axis[1], length_axis[0]], dtype=float)
+
+    pc1_m = max(float(np.ptp(relative @ length_axis)), float(min_pc1_m))
+    pc2_m = max(float(np.ptp(relative @ width_axis)), float(min_pc2_m))
+    if pc2_m > pc1_m:
+        pc1_m, pc2_m = pc2_m, pc1_m
+        length_axis = width_axis
+
+    return centre, pc1_m, pc2_m, length_axis
+
+def closest_point_on_segment(point, start, end):
+    point = np.asarray(point, dtype=float).reshape(2)
+    start = np.asarray(start, dtype=float).reshape(2)
+    end = np.asarray(end, dtype=float).reshape(2)
+    segment = end - start
+    segment_length_sq = float(np.dot(segment, segment))
+    if segment_length_sq < 1e-12:
+        return start.copy()
+    ratio = float(np.clip(np.dot(point - start, segment) / segment_length_sq, 0.0, 1.0))
+    return start + ratio * segment
+
+def ellipse_level_and_away(offset, length_axis, semi_length_m, semi_width_m):
+    offset = np.asarray(offset, dtype=float).reshape(2)
+    length_axis = np.asarray(length_axis, dtype=float).reshape(2)
+    axis_norm = float(np.linalg.norm(length_axis))
+    if axis_norm < 1e-9:
+        length_axis = np.array([1.0, 0.0], dtype=float)
+    else:
+        length_axis = length_axis / axis_norm
+    width_axis = np.array([-length_axis[1], length_axis[0]], dtype=float)
+    semi_length_m = max(float(semi_length_m), 1e-6)
+    semi_width_m = max(float(semi_width_m), 1e-6)
+
+    along = float(np.dot(offset, length_axis))
+    across = float(np.dot(offset, width_axis))
+    level = float(np.hypot(along / semi_length_m, across / semi_width_m))
+    gradient = (
+        along / (semi_length_m * semi_length_m) * length_axis
+        + across / (semi_width_m * semi_width_m) * width_axis
+    )
+    gradient_norm = float(np.linalg.norm(gradient))
+    if gradient_norm < 1e-9:
+        offset_norm = float(np.linalg.norm(offset))
+        away = offset / offset_norm if offset_norm >= 1e-9 else -length_axis
+    else:
+        away = gradient / gradient_norm
+    return level, away
+
+def linear_field_weight(level):
+    return float(np.clip(1.0 - float(level), 0.0, 1.0))
+
+def classic_apf_repulsive_gradient_weight(distance_m, influence_distance_m):
+    distance_m = max(float(distance_m), 1e-3)
+    influence_distance_m = max(float(influence_distance_m), 1e-3)
+    if distance_m > influence_distance_m:
+        return 0.0
+    return float(
+        (1.0 / distance_m - 1.0 / influence_distance_m)
+        / (distance_m * distance_m)
+    )
 
 #global function for navigation
 def extended_kalman_filter_predict(mu, Sigma, u, f, Q, dt):
@@ -70,14 +171,43 @@ def extended_kalman_filter_predict(mu, Sigma, u, f, Q, dt):
     # Return the predicted state and the covariance
     return pred_mu, pred_Sigma
 
-def extended_kalman_filter_update(mu, Sigma, z, indices, R, wrap_index=None):
-    H = np.eye(mu.shape[0], dtype=float)[list(indices)]
-    residual = z - mu[list(indices)]
-    if wrap_index is not None:
-        residual[wrap_index] = wrap_angle(residual[wrap_index])
-    covariance = H @ Sigma @ H.T + R
-    K = np.linalg.solve(covariance, (Sigma @ H.T).T).T
-    return mu + K @ residual, (np.eye(mu.shape[0]) - K @ H) @ Sigma
+def extended_kalman_filter_update(mu, Sigma, z, h, R, wrap_index = None):
+    
+    # Prepare the estimated measurement
+    pred_z, H = h(mu)
+ 
+    # (3) Compute the Kalman gain
+    K = Sigma@ H.T@ Inverse(H@Sigma@H.T + R)
+    
+    # (4) Compute the updated state estimate
+    delta_z = z- pred_z        
+    if wrap_index != None: delta_z[wrap_index] = (delta_z[wrap_index] + np.pi) % (2 * np.pi) - np.pi    
+    cor_mu = mu + K@(delta_z)
+
+    # (5) Compute the updated state covariance
+    cor_Sigma = (Identity(mu.shape[0]) - K @ H) @ Sigma
+    
+    # Return the state and the covariance
+    return cor_mu, cor_Sigma
+
+def h_pose_update(x):
+    est_measurement = Vector(6)
+    est_measurement[N] = x[N]
+    est_measurement[E] = x[E]
+    est_measurement[G] = x[G]
+    H = Matrix(6,6)
+    H[N, N] = 1
+    H[E, E] = 1
+    H[G, G] = 1
+    return est_measurement, H
+
+def h_grate_update(x):
+    est_measurement = Vector(6)
+    est_measurement[DOTG] = x[DOTG]
+
+    H=Matrix(6,6)
+    H[DOTG,DOTG]=1
+    return est_measurement, H 
 
 # main class
 class LaptopController:
@@ -90,33 +220,51 @@ class LaptopController:
         if OPERATING_MODE != 2: # robot
             self.robot_ip = "192.168.10.1"
             self.robot_available = False
+            self.sim_init = False
             aruco_params = {
                 "port": 50001,  # Port to listen to (DO NOT CHANGE)
                 "marker_id": MARKER_ID,  # Marker ID to listen to
-            }
-        else: # webots
+            }                     
+            if platform.system() == "Windows": wifi_name = get_wifi_name()
+            else: wifi_name = "SmartCatXX"
+
+        elif OPERATING_MODE == 2: # webots
             self.robot_ip = "127.0.0.1"          
             aruco_params = {
                 "port": 50000,  # Port to listen to (DO NOT CHANGE)
                 "marker_id": 0,  # Overide for WEBOTS (DO NOT CHANGE)
             }
+            wifi_name = "WEBOTS"
+            self.sim_init = True # Deal with webots timestamps
 
-        self.sim_time_offset = None if OPERATING_MODE == 2 else 0.0
+        self.sim_time_offset = 0.0
                             
         Console.info("Connecting to:", self.robot_ip, "")
+        if wifi_name:            
+            Console.info(f"You are connected to {wifi_name}")
+        else:
+            Console.info("No WiFi connection detected")
 
         # store operating mode
         self.OPERATING_MODE = OPERATING_MODE
+        self.obstacle_ekf_prediction_enabled = ENABLE_OBSTACLE_EKF_PREDICTION
+        Console.info(
+            "Obstacle EKF prediction:",
+            "enabled" if self.obstacle_ekf_prediction_enabled else "disabled",
+        )
 
         ########### INITIALISE DATA LOGS ###################                     
-        filename_time = time.strftime("%Y%m%d_%H%M%S")
-        self.run_dir = Path("logs") / f"run_{filename_time}"
+        filename_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_dir = Path("logs/run_" + filename_time)
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.filename = self.run_dir / f"log_{filename_time}.csv"
+        self.obstacle_log_dir = self.run_dir
         self.last_obstacle_snapshot_stamp_s = None
         
         with self.filename.open('w') as f:
             f.write("EpochTime(s),TimeFromStart(s),right_prop_rate(rad/s),left_prop_rate(rad/s),LastDT(s),Yaw(rad),North(m),East(m),IMUSensedYawRate(rad/s),IMUIntegratedYaw(rad),IMUSensedTimeStamp(s),ARUCOSensedNorth(m),ARUCOSensedEast(m),ARUCOSensedYaw(rad),ArucoSensedTimeStamp(s),DepthTimeStamp(s),Depth(m),NavigationMode,APFEncounter,APFSide,APFDCPA(m),APFTCPA(s),APFForceX,APFForceY,NearestObstacleNorth(m),NearestObstacleEast(m),NearestObstacleDistance(m)\n")
+        global file 
+        file = self.filename
 
         ########### ENTER WAYPOINT VARIABLES ###############
         # Start waypoint: (North, East) in metres
@@ -125,26 +273,33 @@ class LaptopController:
         # Goal waypoint: (North, East) in metres
         goal_north, goal_east = 10, 1
 
+        north_path = [start_north, goal_north]
+        east_path = [start_east, goal_east]
+        
         self.waypoints = []
-        for north, east in (
-            (start_north, start_east),
-            (goal_north, goal_east),
-        ):
+        
+        for i in range(len(north_path)):
             waypoint = Vector3()
-            waypoint.y = north
-            waypoint.x = east
+            
+            waypoint.y = north_path[i]
+            waypoint.x = east_path[i]
+            
             self.waypoints.append(waypoint)
+            print("WAYPOINTS: ", self.waypoints)
+            print("WAYPOINTS TYPE: ", type(self.waypoints))
         
         ########### INITIALISE ROBOT VARIABLES #############        
-        rate = 10.0  # Hz; reduce obstacle-direction decision latency
+        rate = 5.0  # Hz
         self.r = Rate(rate)
         self.lastdt = 1/rate        
         self.starttime = time.time()
         self.timefromstart = None
+        self.prev_sensed = None # originally None
         
         self.sensed_imu_yaw_rate_rad_s = None
         self.sensed_imu_stamp_s = None
         self.sensed_imu_prev_stamp_s = None
+        self.sensed_yaw_rate = None
         self.integrated_yaw = 0
 
         self.sensed_pos_northings_m = None
@@ -158,23 +313,34 @@ class LaptopController:
         self.lidar_data = None
         self.lidar_data_rb = None
         self.lidar_timestamp_s = None
+        self.latest_lidar_received_s = None
+        self.lidar_new = False
         self.lidar_x_bl = 0.1
         self.lidar_y_bl = 0.0
         self.lidar_gamma_bl = 0.0
+        self.lidar = RangeAngleKinematics(self.lidar_x_bl, self.lidar_y_bl, self.lidar_gamma_bl)
 
         # ---------------- LiDAR DBSCAN parameters and outputs ----------------
         self.lidar_dbscan_eps_m = 0.20
         self.lidar_dbscan_min_points = 3
         self.lidar_points_body = np.empty((0, 2))
+        self.lidar_cluster_labels = np.array([], dtype=int)
         self.lidar_obstacles = []
+        self.lidar_obstacle_centres_body = np.empty((0, 2))
+        self.lidar_obstacle_centres_ne = np.empty((0, 2))
+        self.lidar_obstacle_distances_m = np.array([])
+        self.lidar_obstacle_angles_rad = np.array([])
         self.nearest_lidar_obstacle = None
 
         # ---------------- LiDAR sector parameters ----------------
         self.front_angle_limit = np.deg2rad(25)
+        self.front_block_threshold = 0.8
         self.min_front_close_beams = 5
         self.side_angle_min = np.deg2rad(45)
         self.side_angle_max = np.deg2rad(120)
 
+        self.map_observation_class = "unknown"
+        self.front_clearance_m = np.inf
         self.left_clearance_m = np.inf
         self.right_clearance_m = np.inf
 
@@ -200,52 +366,40 @@ class LaptopController:
         self.heading_deviation_guard_rad = np.deg2rad(55.0)
         self.heading_deviation_return_gain = 3.0
 
-        # After avoidance, use a dedicated path-recovery controller instead of
-        # waiting for the lower-gain normal route tracker to remove a large
-        # cross-track error. Different enter/exit thresholds provide hysteresis.
-        self.path_recovery_active = False
-        self.recovery_enter_cross_track_error_m = 0.30
-        self.recovery_exit_cross_track_error_m = 0.12
-        self.recovery_exit_heading_error_rad = np.deg2rad(10.0)
-        self.recovery_lookahead_m = 0.60
-        self.recovery_heading_gain = 2.2
-        self.recovery_min_speed_scale = 0.55
-        self.recovery_max_intercept_angle_rad = np.deg2rad(50.0)
-
         # ----------------  APF parameters ----------------
-        # APF collision-risk distances are multiples of each obstacle's
-        # clustered equivalent radius.
-        self.apf_cluster_influence_scale = 6.0
-        self.apf_safety_activation_margin_cluster_scale = 4.0
-        self.apf_direction_decision_cluster_scale = 10.0
-        self.apf_dcpa_cluster_scale = 6.0
-        self.apf_too_close_cluster_scale = 2.5
-        self.apf_side_lock_exit_margin_cluster_scale = 1.2
+        self.apf_cluster_range_enabled = ENABLE_CLUSTER_BASED_APF_RANGE
+        self.apf_classic_influence_distance_m = CLASSIC_APF_INFLUENCE_DISTANCE_M
+        self.apf_risk_pc_scale = 10.0
+        self.apf_avoidance_pc_scale = 20.0
+        self.apf_direction_pc_scale = 30.0
+        self.apf_virtual_pc_scale = 20.0
         self.apf_activation_front_half_angle_rad = np.deg2rad(150.0)
         self.apf_priority_front_half_angle_rad = np.deg2rad(90.0)
-        self.apf_goal_gain = 7.0
-        self.apf_path_gain = 7.0
-        self.apf_repulsive_gain = 0.12
-        # Closing-speed-dependent dynamic repulsive component.
-        self.apf_dynamic_repulsive_gain = 0.12
+        self.apf_goal_gain = 5.5
+        self.apf_path_gain = 5.5
+        self.apf_repulsive_gain = 0.08
+        self.apf_dynamic_repulsive_gain = 0.10
         self.apf_colreg_side_gain = 2.4
         self.apf_attraction_saturation_m = 3.5
-        self.apf_path_threshold_m = 0.05
+        self.apf_path_threshold_m = 0.10
         self.apf_route_lookahead_m = 2.1 if self.OPERATING_MODE == 2 else 1.8
+        self.apf_clearance_gain = 2.3
         self.apf_collision_horizon_s = 6.0 if self.OPERATING_MODE != 2 else 10.0
-        self.apf_prediction_dt_s = 0.1
-        self.apf_heading_gain = 0.6
+        self.apf_prediction_dt_s = 0.5
+        self.apf_heading_gain = 0.9
         self.apf_heading_step_limit_rad = np.deg2rad(60.0)
         self.apf_min_forward_speed = 0.06
-        # Baseline APF surge speed. The controller reduces it inside the
-        # cluster-scaled safety boundary.
+        # Fixed-step APF descent: the potential-field gradient determines only
+        # the travel direction while avoidance uses a constant surge speed.
         self.apf_constant_descent_speed_m_s = self.route_tracking_speed_m_s
         self.apf_pass_astern_gain = 2.2
         self.apf_force_body = np.zeros(2, dtype=float)
         self.apf_repulsive_force_body = np.zeros(2, dtype=float)
+        self.apf_attractive_force_body = np.zeros(2, dtype=float)
         self.apf_steering_force_body = np.zeros(2, dtype=float)
         self.apf_target_ne = np.array([np.nan, np.nan], dtype=float)
         self.apf_encounter_mode = "none"
+        self.apf_colreg_rule = "none"
         self.apf_avoidance_side_sign = 0.0
         self.apf_colreg_dcpa_m = np.nan
         self.apf_colreg_tcpa_s = np.nan
@@ -267,46 +421,47 @@ class LaptopController:
         self.obstacle_prediction_horizon_s = 5.0 if self.OPERATING_MODE == 2 else 4.0
         self.obstacle_prediction_step_s = 0.5
         self.obstacle_history_len = 60
-        self.obstacle_stats_window_s = 1.5
-        self.obstacle_prediction_min_samples = 2
-        self.obstacle_prediction_min_hits = 2
-        self.obstacle_prediction_min_time_span_s = 0.15
+        self.obstacle_stats_window_s = 2.5
+        self.obstacle_prediction_min_samples = 3
+        self.obstacle_prediction_min_hits = 3
+        self.obstacle_prediction_min_time_span_s = 0.8
         self.obstacle_prediction_max_speed_std_m_s = 0.10
         self.obstacle_prediction_max_heading_var_rad2 = np.deg2rad(35.0) ** 2
         self.obstacle_prediction_accel_min_samples = 10
         self.obstacle_prediction_max_accel_std_m_s2 = 0.25
-        self.obstacle_min_equivalent_radius_m = 0.18 if self.OPERATING_MODE == 2 else 0.15
+        self.obstacle_min_pc1_m = 0.36 if self.OPERATING_MODE == 2 else 0.30
+        self.obstacle_min_pc2_m = 0.20 if self.OPERATING_MODE == 2 else 0.16
+        self.obstacle_min_equivalent_radius_m = 0.5 * self.obstacle_min_pc1_m
         self.obstacle_max_accel_m_s2 = 0.80 if self.OPERATING_MODE == 2 else 0.60
         self.apf_own_equivalent_radius_m = 0.30 if self.OPERATING_MODE == 2 else 0.25
         self.apf_virtual_repulsive_gain = 0.12
         self.apf_side_lock_sign = 0.0
         self.apf_side_lock_until_s = 0.0
-        self.apf_side_lock_s = 6.0 if self.OPERATING_MODE != 2 else 8.0
+        self.apf_side_lock_s = 5.0 if self.OPERATING_MODE != 2 else 8.0
+        self.apf_side_lock_exit_level = 1.15
         self.apf_side_lock_active = False
-        self.apf_side_lock_authoritative = False
-        self.apf_side_lock_release_separation_speed_m_s = 0.01
-        # Once an overtaking side is selected, keep that side until the own
-        # ship is safely ahead along the route.  A bounded yaw request preserves
-        # enough common thrust to complete the pass instead of pivoting in place.
-        self.apf_overtaking_active = False
-        self.apf_overtaking_track_id = None
-        self.apf_overtaking_side_sign = 0.0
-        self.apf_overtaking_passed_since_s = None
-        self.apf_overtaking_completed_track_id = None
-        self.apf_overtaking_ignore_until_s = 0.0
-        self.apf_overtaking_route_lead_margin_m = 0.20
-        self.apf_overtaking_completion_hold_s = 0.40
-        self.apf_overtaking_ignore_s = 2.0
-        self.apf_overtaking_min_separation_speed_m_s = 0.02
-        self.apf_overtaking_speed_scale = 10
-        self.apf_overtaking_min_speed_scale = 1
-        self.apf_overtaking_yaw_rate_limit_rad_s = np.deg2rad(80.0)
-        self.apf_visual_hold_s = 10.0
+        self.apf_visual_hold_s = 2.0
         self.apf_visual_hold_until_s = 0.0
+        Console.info(
+            "APF influence range:",
+            (
+                "DBSCAN cluster pc1/pc2"
+                if self.apf_cluster_range_enabled
+                else f"classical APF Q*={self.apf_classic_influence_distance_m:.2f} m"
+            ),
+        )
         
-        self.North = float(start_north)
-        self.East = float(start_east)
-        self.Yaw = 0.0
+        self.initial_state = Vector(6)
+        self.initial_state[N] = start_north
+        self.initial_state[E] = start_east
+        self.initial_state[G] = 0
+        self.initial_state[DOTN] = 0
+        self.initial_state[DOTE] = 0
+        self.initial_state[DOTG] = 0
+        
+        self.North = self.initial_state[N][0]
+        self.East = self.initial_state[E][0]
+        self.Yaw = self.initial_state[G][0]         
 
         self.right_rate = 0
         self.left_rate = 0
@@ -314,8 +469,13 @@ class LaptopController:
         ############################# MOTION MODEL VARIABLES #######################
         # Body-force model: positive force from either thruster acts forward.
         # The right propeller command sign is handled at the RPM conversion.
+        phi=l2m([0,0])        
+        x=l2m([0,0])
         # Body-frame lateral offsets: right thruster is negative y, left is positive y.
-        self.G = TAM(Vector(2), Vector(2), l2m([-0.09, 0.09]))
+        y=l2m([-0.09,0.09])
+        
+        self.G=TAM(phi,x,y)
+        print('G = ',self.G)
         
         # hull, water properties
         rho = 1000 # density of water in kg/m3
@@ -338,7 +498,10 @@ class LaptopController:
 
         m_tot = mass + mass_add
 
+        # Added mass from Imlay 1961, Technical Report DTMB - assuming a prolate spheroid
         I_66 = mass*((length/2)**2+(width/2)**2)/4 # rough approximation as rectangle
+        e = 1 - (beam/length)**2
+        alpha = (2*(1-e**2)/e**3)*(0.5*np.log((1+e)/(1-e))-e) #note np.log() = ln(), np.log10()=log()
         beta = 1/e**2 - ((1-e**2)/(2*e**3)) * np.log((1+e)/(1-e))  # kg of water pushed by hull with, note this is for an infinite
 
         I66_add = 2*(1/5)*mass*((draft**2-length**2)**2*(alpha-beta)/(2*(draft**2-length**2)+(draft**2+length**2)/(beta-alpha)))
@@ -348,28 +511,56 @@ class LaptopController:
         # drag B_66
         B_66 = 0.12#0.12
         
+        self.initial_pose = True # Set false after pose is initialised
+        
+
         # read these into our vehicle class
         self.robot = Vehicle2D_e(m_tot,I_tot,k_drag,B_66)
+        self.robot.info()
         
         self.v_robot = Vector(3) # initially stationary velocity vector in e frame
         self.p_robot = Vector(3); self.p_robot[0] = start_north; self.p_robot[1] = start_east; self.p_robot[2] = np.deg2rad(0) # pose in the e frame
         
         ############################# CONTROL VARIABLES #######################
-        self.v_max = 1.0 #fastest the robot can go # 0.2
+        # Setup control parameters
+        #################################################################
+        tau_s = 2 #s to remove along track error # 0.5
+        self.L = 0.3#m distance to remove normal and angular error
+        self.ks =  1/tau_s
+        self.kn = None 
+        self.kg = None
+        
+        self.v_max = 0.85 #fastest the robot can go # 0.2
         self.w_max = np.deg2rad(80) #fastest the robot can turn # 30
-        self.linear_acceleration_limit_m_s2 = 0.4
-        self.linear_deceleration_limit_m_s2 = 0.4
-        self.angular_acceleration_limit_rad_s2 = np.deg2rad(80.0)
         self.prop_rate_limit_rad_s = 200.0
+        # setup a contranor to store controls
+        self.U = Vector(2).T
+        ################################################################
+        # Setup trajectory
+        #################################################################
+        v = self.route_tracking_speed_m_s
+        a = 0.4 # 0.1 
+        self.s = TrajectoryGenerate(north_path,east_path)
+        self.s.path_to_trajectory(v, a)
+
+        # Generate turning arcs trajectory
+        self.arc_radius = 0.02
+        self.s.turning_arcs(self.arc_radius) 
+        self.s.wp_id = len(self.s.P_arc) - 1
+        self.trajectory_duration_s = float(self.s.Tp_arc[-1][0])
 
         ############################# EKF VARIABLES ####################
         # State x = [N, E, G, Ndot, Edot, Gdot]^T
         self.mu = Vector(6)
-        self.mu[N] = start_north
-        self.mu[E] = start_east
+        self.mu[N]    = self.initial_state[N]
+        self.mu[E]    = self.initial_state[E]
+        self.mu[G]    = self.initial_state[G]
+        self.mu[DOTN] = self.initial_state[DOTN]
+        self.mu[DOTE] = self.initial_state[DOTE]
+        self.mu[DOTG] = self.initial_state[DOTG]
         
         # Initial covariance
-        self.Sigma = np.eye(6)
+        self.Sigma = Identity(6)
         # Position uncertainty (m^2)
         self.Sigma[N, N]   = 0.01      # 0.1 m std
         self.Sigma[E, E]   = 0.01
@@ -381,7 +572,7 @@ class LaptopController:
         self.Sigma[DOTG, DOTG] = np.deg2rad(10.0)**2
         
         # Process noise Q (very simple diagonal)
-        self.Q = np.eye(6)
+        self.Q = Identity(6)
         q_pos = 1e-4
         q_vel = 1e-3
         self.Q[N, N]   = q_pos
@@ -392,42 +583,51 @@ class LaptopController:
         self.Q[DOTG, DOTG] = 1e-4
         
         # Measurement noise for ArUco pose (N, E, G)
-        self.R_pose = np.diag([0.02**2, 0.02**2, np.deg2rad(2.0)**2])
+        self.R_pose = Identity(6)
+        self.R_pose[N, N] = 0.02**2                 # 2 cm std
+        self.R_pose[E, E] = 0.02**2
+        self.R_pose[G, G] = np.deg2rad(2.0)**2      # 2 deg std
         
         # Measurement noise for IMU yaw rate (Gdot)
-        self.R_grate = np.array([[np.deg2rad(1.0)**2]])
+        self.R_grate = Identity(6)
+        self.R_grate[DOTG, DOTG] = np.deg2rad(1.0)**2
         
+        # Time bookkeeping for EKF (not strictly needed, but handy)
+        self.last_nav_t = self.starttime
+                    
         ############################# DECLARE PUBLISHERS AND SUBSCRIBERS ######         
         self.control_pub = Publisher("/control", Vector3, ip=self.robot_ip)
+        self.config_pub = Publisher("/config", String, ip=self.robot_ip)
         self.imu_sub = Subscriber("/imu", Vector3, self.imu_cb, ip=self.robot_ip)
         self.sonar_sub = Subscriber("/sonar", Vector3, self.sonar_cb, ip=self.robot_ip)
         self.lidar_sub = Subscriber("/lidar", RBLaserScan, self.lidar_callback, ip=self.robot_ip)
-        self.aruco_driver = ArUcoUDPDriver(aruco_params, parent=self)
+        self.console_sub = Subscriber("/command", String, self.command_cb, ip=self.robot_ip)
+        self.aruco_driver = ArUcoUDPDriver(aruco_params, parent=self)        
+        # a callback only used by WEBOTS to fake Aruco readings 
+        self.groundtruth_sub = Subscriber("/groundtruth", PoseStamped, self.groundtruth_callback, ip=self.robot_ip) 
+        self.pseudo_aruco_counter = 0
         
         ########### CONNECT TO ROBOT ###########
         if OPERATING_MODE != 2: # not a simulation
-            self.config_pub = Publisher("/config", String, ip=self.robot_ip)
             # waits for robot to respond to configure
+            count = 0
             Console.info("Connecting to robot")               
             while not self.robot_available:
                 self.config_pub.publish(String("Configure"))
                 time.sleep(1.0)
+                count += 1
             time.sleep(5.0)
         else: # WEBOTS create fake ARUCO logs
-            self.pseudo_aruco_counter = 0
             self.sensed_imu_stamp_s = 0 
             self.groundtruth_log = self.run_dir / f"log_{filename_time}_pseudo_aruco.csv"
             with self.groundtruth_log.open('w') as f:
                 f.write("epoch [s],elapsed [s],x [m],y [m],z [m],roll [deg],pitch [deg],yaw [deg],broadcast\n")
-            self.groundtruth_sub = Subscriber(
-                "/groundtruth", PoseStamped, self.groundtruth_callback, ip=self.robot_ip
-            )
 
         ########### INITIALISE THRUSTERS ###########
-        self.initialise_pose = True
-        for _ in range(10): #  rad/s
+        for i in range(10): #  rad/s
             self.control_pub.publish(Vector3())           
-            self.r.sleep()
+            self.r.sleep()  
+            self.initialise_pose = True # Will set to false once the pose is initialised               
 
 
         ######## Setup EXIT key if show_laptop not used #####
@@ -437,7 +637,10 @@ class LaptopController:
                     self.loop()
                 except KeyboardInterrupt:
                     Console.info("Ctrl+C pressed. Stopping...")
-                    self.stopcommand()
+                    if self.OPERATING_MODE == 0:
+                        self.imu_sub.stop()
+                        self.sonar_sub.stop()
+                        self.lidar_sub.stop()
                     break
                 self.r.sleep() 
         ############################## END OF INITIALISATION ##################
@@ -446,10 +649,10 @@ class LaptopController:
     def stopcommand(self):        
         Console.info("Thrusters stopping")
         control_msg = Vector3() # initially 0
-        for _ in range(10):
+        for i in range(10):
             self.control_pub.publish(control_msg)
+            self.imu_sub.stop()
             self.r.sleep()
-        self.imu_sub.stop()
         self.sonar_sub.stop()
         self.lidar_sub.stop()
         Console.info("Thrusters stopped")
@@ -467,12 +670,17 @@ class LaptopController:
         self.sensed_bottom_depth_stamp_s = time.time()
         self.robot_available = True
 
+    def command_cb(self,msg: String):
+        Console.info(f"Response from robot: {msg.data}")
+
     # ---------------- LiDAR callback ----------------
     def lidar_callback(self, msg: RBLaserScan):
-        if self.sim_time_offset is None:
+        if self.sim_init:
             self.sim_time_offset = time.time() - msg.header.stamp
+            self.sim_init = False
 
         self.lidar_timestamp_s = msg.header.stamp + self.sim_time_offset
+        self.latest_lidar_received_s = self.lidar_timestamp_s
 
         ranges = np.array(msg.ranges, dtype=float)
         angles = np.array(msg.angles, dtype=float)
@@ -486,31 +694,43 @@ class LaptopController:
         self.lidar_data_rb = np.column_stack([ranges, angles])
 
         pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
-        valid = (
-            np.isfinite(ranges)
-            & np.isfinite(angles)
-            & (ranges >= 0.05)
-            & (ranges <= 5.0)
-            & (np.abs(angles) <= np.pi / 2)
-        )
-        beam_angles = angles[valid] + self.lidar_gamma_bl
-        points_body = np.column_stack([
-            self.lidar_x_bl + ranges[valid] * np.cos(beam_angles),
-            self.lidar_y_bl + ranges[valid] * np.sin(beam_angles),
-        ])
-        c, s = np.cos(pose[2]), np.sin(pose[2])
-        self.lidar_data = points_body @ np.array([[c, s], [-s, c]]) + pose[:2]
+        p_eb = Vector(3)
+        p_eb[0] = pose[0]
+        p_eb[1] = pose[1]
+        p_eb[2] = pose[2]
+
+        self.lidar_data = np.full((len(ranges), 2), np.nan)
+        z_lm = Vector(2)
+
+        for i, range_m in enumerate(ranges):
+            if np.isfinite(range_m):
+                z_lm[0] = range_m
+                z_lm[1] = angles[i]
+                t_em = self.lidar.rangeangle_to_loc(p_eb, z_lm)
+
+                self.lidar_data[i, 0] = t_em[0]
+                self.lidar_data[i, 1] = t_em[1]
+
+        self.lidar_data = self.lidar_data[~np.isnan(self.lidar_data).any(axis=1)]
         self.update_lidar_obstacle_clusters()
         self.update_apf_obstacle_tracks(self.lidar_timestamp_s)
         self.update_lidar_sectors()
+        self.lidar_new = True
         self.robot_available = True
 
     # ---------------- LiDAR coordinate transforms ----------------
     def earth_vector_to_body(self, vector_ne):
         # Body frame convention: x is forward, y is left, gamma is yaw in earth frame.
         pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
-        c, s = np.cos(pose[2]), np.sin(pose[2])
-        return np.array([[c, s], [-s, c]]) @ np.asarray(vector_ne, dtype=float).reshape(2)
+        yaw = pose[2]
+        c = np.cos(yaw)
+        s = np.sin(yaw)
+        vector_ne = np.asarray(vector_ne, dtype=float).reshape(2)
+
+        return np.array([
+            c * vector_ne[0] + s * vector_ne[1],
+            -s * vector_ne[0] + c * vector_ne[1],
+        ])
 
     def earth_point_to_body(self, point_ne):
         # Point transform is a vector transform after subtracting the EKF robot position.
@@ -519,17 +739,37 @@ class LaptopController:
 
     def body_vector_to_earth(self, vector_body):
         pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
-        c, s = np.cos(pose[2]), np.sin(pose[2])
-        return np.array([[c, -s], [s, c]]) @ np.asarray(vector_body, dtype=float).reshape(2)
+        yaw = pose[2]
+        c = np.cos(yaw)
+        s = np.sin(yaw)
+        vector_body = np.asarray(vector_body, dtype=float).reshape(2)
+
+        return np.array([
+            c * vector_body[0] - s * vector_body[1],
+            s * vector_body[0] + c * vector_body[1],
+        ])
 
     def body_point_to_earth(self, point_body):
         pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
-        return pose[:2] + self.body_vector_to_earth(point_body)
+        yaw = pose[2]
+        c = np.cos(yaw)
+        s = np.sin(yaw)
+        point_body = np.asarray(point_body, dtype=float).reshape(2)
+
+        return np.array([
+            pose[0] + c * point_body[0] - s * point_body[1],
+            pose[1] + s * point_body[0] + c * point_body[1],
+        ])
 
     # ---------------- LiDAR DBSCAN clustering ----------------
     def clear_lidar_obstacle_clusters(self):
         self.lidar_points_body = np.empty((0, 2))
+        self.lidar_cluster_labels = np.array([], dtype=int)
         self.lidar_obstacles = []
+        self.lidar_obstacle_centres_body = np.empty((0, 2))
+        self.lidar_obstacle_centres_ne = np.empty((0, 2))
+        self.lidar_obstacle_distances_m = np.array([])
+        self.lidar_obstacle_angles_rad = np.array([])
         self.nearest_lidar_obstacle = None
 
     def update_lidar_obstacle_clusters(self):
@@ -558,6 +798,7 @@ class LaptopController:
             min_samples=self.lidar_dbscan_min_points,
             n_jobs=1,
         ).fit_predict(self.lidar_points_body)
+        self.lidar_cluster_labels = labels
 
         obstacles = []
         for label in sorted(set(labels)):
@@ -565,22 +806,18 @@ class LaptopController:
                 continue
 
             cluster_points = self.lidar_points_body[labels == label]
-            centre_body = np.mean(cluster_points, axis=0)
+            centre_body, pc1_m, pc2_m, length_axis_body = cluster_principal_dimensions(
+                cluster_points,
+                self.obstacle_min_pc1_m,
+                self.obstacle_min_pc2_m,
+            )
             relative_points = cluster_points - centre_body
             cluster_radius_m = float(np.max(np.linalg.norm(relative_points, axis=1)))
             cluster_extent_xy_m = np.ptp(cluster_points, axis=0)
             cluster_size_m = float(np.linalg.norm(cluster_extent_xy_m))
-            equivalent_radius_m = max(
-                self.obstacle_min_equivalent_radius_m,
-                cluster_radius_m,
-                0.5 * cluster_size_m,
-            )
-            safety_radius_m = self.apf_cluster_influence_scale * equivalent_radius_m
-            activation_radius_m = safety_radius_m + (
-                self.apf_safety_activation_margin_cluster_scale
-                * equivalent_radius_m
-            )
+            equivalent_radius_m = 0.5 * max(pc1_m, pc2_m)
             centre_ne = self.body_point_to_earth(centre_body)
+            length_axis_ne = self.body_vector_to_earth(length_axis_body)
             centre_distance_m = float(np.linalg.norm(centre_body))
             centre_angle_rad = float(np.arctan2(centre_body[1], centre_body[0]))
             min_distance_m = float(np.min(np.linalg.norm(cluster_points, axis=1)))
@@ -596,21 +833,39 @@ class LaptopController:
                 "min_distance_m": min_distance_m,
                 "cluster_radius_m": cluster_radius_m,
                 "cluster_size_m": cluster_size_m,
+                "pc1_m": pc1_m,
+                "pc2_m": pc2_m,
+                "length_axis_body": length_axis_body.tolist(),
+                "length_axis_ne": length_axis_ne.tolist(),
                 "equivalent_radius_m": equivalent_radius_m,
-                "safety_radius_m": safety_radius_m,
-                "influence_radius_m": safety_radius_m,
-                "activation_radius_m": activation_radius_m,
-                "dcpa_threshold_m": (
-                    self.apf_dcpa_cluster_scale * equivalent_radius_m
-                ),
-                "too_close_threshold_m": (
-                    self.apf_too_close_cluster_scale * equivalent_radius_m
-                ),
             })
 
         obstacles.sort(key=lambda obstacle: obstacle["distance_m"])
         self.lidar_obstacles = obstacles
         self.nearest_lidar_obstacle = obstacles[0] if obstacles else None
+
+        if obstacles:
+            self.lidar_obstacle_centres_body = np.array(
+                [obstacle["centre_body"] for obstacle in obstacles],
+                dtype=float,
+            )
+            self.lidar_obstacle_centres_ne = np.array(
+                [obstacle["centre_ne"] for obstacle in obstacles],
+                dtype=float,
+            )
+            self.lidar_obstacle_distances_m = np.array(
+                [obstacle["distance_m"] for obstacle in obstacles],
+                dtype=float,
+            )
+            self.lidar_obstacle_angles_rad = np.array(
+                [obstacle["angle_rad"] for obstacle in obstacles],
+                dtype=float,
+            )
+        else:
+            self.lidar_obstacle_centres_body = np.empty((0, 2))
+            self.lidar_obstacle_centres_ne = np.empty((0, 2))
+            self.lidar_obstacle_distances_m = np.array([])
+            self.lidar_obstacle_angles_rad = np.array([])
 
     # ---------------- LiDAR sector helpers ----------------
     def sector_ranges(self, angle_min, angle_max):
@@ -642,6 +897,11 @@ class LaptopController:
         return val
 
     def update_lidar_sectors(self):
+        self.front_clearance_m = self.sector_min_range(
+            -self.front_angle_limit,
+            self.front_angle_limit,
+        )
+
         self.left_clearance_m = self.sector_min_range(
             self.side_angle_min,
             self.side_angle_max,
@@ -652,25 +912,29 @@ class LaptopController:
             -self.side_angle_min,
         )
 
-    def front_block_threshold_m(self):
-        front_obstacles = []
-        for obstacle in self.lidar_obstacles:
-            angle_rad = abs(
-                wrap_angle(float(obstacle.get("angle_rad", np.inf)))
-            )
-            if angle_rad <= self.front_angle_limit:
-                front_obstacles.append(obstacle)
-
-        if front_obstacles:
-            return max(
-                self.apf_obstacle_too_close_threshold_m(obstacle)
-                for obstacle in front_obstacles
-            )
-
-        return (
-            self.apf_too_close_cluster_scale
-            * self.obstacle_min_equivalent_radius_m
+        front_ranges = self.sector_ranges(
+            -self.front_angle_limit,
+            self.front_angle_limit,
         )
+
+        if len(front_ranges) == 0:
+            front_blocked = False
+        else:
+            front_blocked = np.sum(front_ranges < self.front_block_threshold) >= self.min_front_close_beams
+
+        left_open = self.left_clearance_m > self.front_block_threshold
+        right_open = self.right_clearance_m > self.front_block_threshold
+
+        if front_blocked and left_open and right_open:
+            self.map_observation_class = "t_junction_or_end_wall"
+        elif front_blocked and left_open:
+            self.map_observation_class = "right_angle_left_turn"
+        elif front_blocked and right_open:
+            self.map_observation_class = "right_angle_right_turn"
+        elif front_blocked:
+            self.map_observation_class = "blocked_front"
+        else:
+            self.map_observation_class = "straight_section"
 
     def front_blocked(self):
         self.update_lidar_sectors()
@@ -683,9 +947,7 @@ class LaptopController:
         if len(front_ranges) == 0:
             return False
 
-        close_count = int(
-            np.sum(front_ranges < self.front_block_threshold_m())
-        )
+        close_count = int(np.sum(front_ranges < self.front_block_threshold))
         return close_count >= self.min_front_close_beams
 
     def json_safe(self, value):
@@ -718,7 +980,7 @@ class LaptopController:
         return value
 
     def write_obstacle_snapshot(self):
-        stamp_s = self.lidar_timestamp_s
+        stamp_s = self.latest_lidar_received_s
         if stamp_s is None:
             return
 
@@ -729,30 +991,47 @@ class LaptopController:
         self.last_obstacle_snapshot_stamp_s = stamp_s
         payload = {
             "t": self.timefromstart,
+            "timestamp_s": stamp_s,
             "robot_pos": [self.North, self.East],
+            "robot_yaw_rad": self.Yaw,
             "cloud": self.lidar_data if self.lidar_data is not None else [],
             "clusters": self.lidar_obstacles,
             "tracks": self.obstacle_track_visuals(),
+            "virtual_obstacles": self.apf_virtual_obstacles,
+            "apf": {
+                "navigation_mode": self.navigation_mode,
+                "encounter": self.apf_encounter_mode,
+                "colreg_rule": self.apf_colreg_rule,
+                "side": self.apf_avoidance_side_sign,
+                "dcpa_m": self.apf_colreg_dcpa_m,
+                "tcpa_s": self.apf_colreg_tcpa_s,
+                "force_body": self.apf_force_body,
+                "repulsive_force_body": self.apf_repulsive_force_body,
+                "attractive_force_body": self.apf_attractive_force_body,
+                "target_ne": self.apf_target_ne,
+            },
             "apf_settings": {
                 "own_equivalent_radius_m": self.apf_own_equivalent_radius_m,
-                "dcpa_cluster_scale": self.apf_dcpa_cluster_scale,
-                "too_close_cluster_scale": self.apf_too_close_cluster_scale,
-                "reference_dcpa_threshold_m": (
-                    self.apf_dcpa_cluster_scale
-                    * self.obstacle_min_equivalent_radius_m
-                ),
-                "obstacle_min_equivalent_radius_m": (
-                    self.obstacle_min_equivalent_radius_m
-                ),
                 "collision_horizon_s": self.apf_collision_horizon_s,
                 "prediction_dt_s": self.apf_prediction_dt_s,
                 "constant_descent_speed_m_s": self.apf_constant_descent_speed_m_s,
-                "obstacle_ekf_prediction_enabled": ENABLE_OBSTACLE_EKF_PREDICTION,
+                "obstacle_ekf_prediction_enabled": self.obstacle_ekf_prediction_enabled,
                 "obstacle_prediction_horizon_s": self.obstacle_prediction_horizon_s,
                 "obstacle_prediction_step_s": self.obstacle_prediction_step_s,
                 "dynamic_speed_enter_m_s": self.apf_dynamic_speed_threshold_m_s,
                 "dynamic_speed_exit_m_s": self.apf_dynamic_exit_speed_threshold_m_s,
-                "cluster_influence_scale": self.apf_cluster_influence_scale,
+                "prediction_min_samples": self.obstacle_prediction_min_samples,
+                "prediction_min_time_span_s": self.obstacle_prediction_min_time_span_s,
+                "prediction_max_speed_std_m_s": self.obstacle_prediction_max_speed_std_m_s,
+                "prediction_max_heading_var_rad2": self.obstacle_prediction_max_heading_var_rad2,
+                "cluster_range_enabled": self.apf_cluster_range_enabled,
+                "classic_influence_distance_m": self.apf_classic_influence_distance_m,
+                "risk_pc_scale": self.apf_risk_pc_scale,
+                "avoidance_pc_scale": self.apf_avoidance_pc_scale,
+                "direction_pc_scale": self.apf_direction_pc_scale,
+                "virtual_pc_scale": self.apf_virtual_pc_scale,
+                "minimum_pc1_m": self.obstacle_min_pc1_m,
+                "minimum_pc2_m": self.obstacle_min_pc2_m,
             },
             "dbscan": {
                 "eps_m": self.lidar_dbscan_eps_m,
@@ -761,27 +1040,30 @@ class LaptopController:
         }
 
         filename = f"obstacle_{int(round(stamp_s * 1000.0))}.json"
-        with (self.run_dir / filename).open("w") as f:
-            json.dump(self.json_safe(payload), f)
+        with (self.obstacle_log_dir / filename).open("w") as f:
+            json.dump(self.json_safe(payload), f, indent=2)
 
     # ---------------- COLREGS-compliant modified APF ----------------
     def reset_apf_diagnostics(self, clear_visual=True):
         if clear_visual:
             self.apf_force_body = np.zeros(2, dtype=float)
             self.apf_repulsive_force_body = np.zeros(2, dtype=float)
+            self.apf_attractive_force_body = np.zeros(2, dtype=float)
             self.apf_steering_force_body = np.zeros(2, dtype=float)
             self.apf_target_ne = np.array([np.nan, np.nan], dtype=float)
             self.apf_virtual_obstacles = []
             self.apf_visual_hold_until_s = 0.0
 
         self.apf_encounter_mode = "none"
+        self.apf_colreg_rule = "none"
         self.apf_avoidance_side_sign = 0.0
         self.apf_colreg_dcpa_m = np.nan
         self.apf_colreg_tcpa_s = np.nan
         self.apf_colreg_active = False
 
     def apf_visual_hold_active(self):
-        return (self.timefromstart or 0.0) < self.apf_visual_hold_until_s
+        now_s = float(self.timefromstart) if self.timefromstart is not None else 0.0
+        return now_s < self.apf_visual_hold_until_s
 
     def limit_heading_deviation_command(self, yaw_rate_cmd):
         yaw_rate_cmd = float(yaw_rate_cmd)
@@ -942,7 +1224,7 @@ class LaptopController:
         return accel_ne
 
     def obstacle_track_prediction_ne(self, track):
-        if not ENABLE_OBSTACLE_EKF_PREDICTION:
+        if not self.obstacle_ekf_prediction_enabled:
             return np.empty((0, 2), dtype=float)
 
         state = np.asarray(track.get("state", [np.nan, np.nan, 0.0, 0.0]), dtype=float).reshape(4)
@@ -956,8 +1238,11 @@ class LaptopController:
         accel_ne = self.obstacle_track_prediction_accel_ne(track)
 
         step_s = max(float(self.obstacle_prediction_step_s), 1e-3)
-        horizon_s = max(float(self.obstacle_prediction_horizon_s), step_s)
-        times = np.arange(0.0, horizon_s + 0.5 * step_s, step_s, dtype=float)
+        collision_time_s = float(track.get("collision_time_s", np.nan))
+        if not np.isfinite(collision_time_s) or collision_time_s <= 0.0:
+            return np.empty((0, 2), dtype=float)
+        times = np.arange(0.0, collision_time_s, step_s, dtype=float)
+        times = np.r_[times, collision_time_s]
 
         return np.column_stack(
             [
@@ -971,11 +1256,24 @@ class LaptopController:
         track["pos_ne"] = state[0:2].copy()
         track["vel_ne"] = state[2:4].copy()
 
-        radius_m = float(track.get("radius_m", track.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m)))
-        if not np.isfinite(radius_m) or radius_m <= 0.0:
-            radius_m = self.obstacle_min_equivalent_radius_m
-        track["radius_m"] = max(radius_m, self.obstacle_min_equivalent_radius_m)
+        pc1_m = float(track.get("pc1_m", self.obstacle_min_pc1_m))
+        pc2_m = float(track.get("pc2_m", self.obstacle_min_pc2_m))
+        if not np.isfinite(pc1_m) or pc1_m <= 0.0:
+            pc1_m = self.obstacle_min_pc1_m
+        if not np.isfinite(pc2_m) or pc2_m <= 0.0:
+            pc2_m = self.obstacle_min_pc2_m
+        track["pc1_m"] = max(pc1_m, self.obstacle_min_pc1_m)
+        track["pc2_m"] = max(min(pc2_m, track["pc1_m"]), self.obstacle_min_pc2_m)
+        track["radius_m"] = 0.5 * track["pc1_m"]
         track["equivalent_radius_m"] = track["radius_m"]
+
+        length_axis_ne = np.asarray(track.get("length_axis_ne", [1.0, 0.0]), dtype=float).reshape(2)
+        axis_norm = float(np.linalg.norm(length_axis_ne))
+        track["length_axis_ne"] = (
+            length_axis_ne / axis_norm
+            if np.isfinite(length_axis_ne).all() and axis_norm >= 1e-6
+            else np.array([1.0, 0.0], dtype=float)
+        )
 
         display_velocity_ne = np.asarray(track.get("velocity_mean_ne", track["vel_ne"]), dtype=float).reshape(2)
         if not np.isfinite(display_velocity_ne).all():
@@ -987,11 +1285,17 @@ class LaptopController:
             heading_rad = float(np.arctan2(display_velocity_ne[1], display_velocity_ne[0]))
             track["heading_rad"] = heading_rad
             track["heading_deg"] = float(np.rad2deg(heading_rad))
+            track["heading_axis_ne"] = (
+                display_velocity_ne / speed_m_s
+                if bool(track.get("motion_stable", False))
+                else track["length_axis_ne"].copy()
+            )
         else:
             track["heading_rad"] = np.nan
             track["heading_deg"] = np.nan
+            track["heading_axis_ne"] = track["length_axis_ne"].copy()
 
-        if not ENABLE_OBSTACLE_EKF_PREDICTION:
+        if not self.obstacle_ekf_prediction_enabled:
             track["prediction_model"] = "disabled"
             track["prediction_ne"] = np.empty((0, 2), dtype=float)
             return
@@ -1004,10 +1308,21 @@ class LaptopController:
             track["prediction_model"] = "ekf_constant_velocity"
         track["prediction_ne"] = self.obstacle_track_prediction_ne(track)
 
-    def make_obstacle_track(self, detection_ne, stamp_s, radius_m=np.nan):
+    def make_obstacle_track(
+        self,
+        detection_ne,
+        stamp_s,
+        pc1_m=np.nan,
+        pc2_m=np.nan,
+        length_axis_ne=None,
+    ):
         detection_ne = np.asarray(detection_ne, dtype=float).reshape(2)
-        radius_m = float(radius_m) if np.isfinite(radius_m) and radius_m > 0.0 else self.obstacle_min_equivalent_radius_m
-        radius_m = max(radius_m, self.obstacle_min_equivalent_radius_m)
+        pc1_m = float(pc1_m) if np.isfinite(pc1_m) and pc1_m > 0.0 else self.obstacle_min_pc1_m
+        pc2_m = float(pc2_m) if np.isfinite(pc2_m) and pc2_m > 0.0 else self.obstacle_min_pc2_m
+        length_axis_ne = np.asarray(
+            [1.0, 0.0] if length_axis_ne is None else length_axis_ne,
+            dtype=float,
+        ).reshape(2)
         covariance = np.diag(
             [
                 self.obstacle_ekf_initial_position_std_m ** 2,
@@ -1025,12 +1340,21 @@ class LaptopController:
             "hit_count": 1,
             "miss_count": 0,
             "history_ne": [],
+            "lidar_history_ne": [],
             "motion_window": [],
-            "radius_m": radius_m,
-            "equivalent_radius_m": radius_m,
+            "pc1_m": pc1_m,
+            "pc2_m": pc2_m,
+            "length_axis_ne": length_axis_ne,
         }
         self.sync_obstacle_track_fields(track)
-        self.append_obstacle_track_history(track, radius_m=radius_m, stamp_s=stamp_s)
+        self.append_obstacle_track_history(
+            track,
+            pc1_m=pc1_m,
+            pc2_m=pc2_m,
+            length_axis_ne=length_axis_ne,
+            detection_ne=detection_ne,
+            stamp_s=stamp_s,
+        )
         self.apf_next_track_id += 1
         return track
 
@@ -1047,21 +1371,48 @@ class LaptopController:
         track["stamp_s"] = now
         self.sync_obstacle_track_fields(track)
 
-    def append_obstacle_track_history(self, track, radius_m=np.nan, stamp_s=None):
+    def append_obstacle_track_history(
+        self,
+        track,
+        pc1_m=np.nan,
+        pc2_m=np.nan,
+        length_axis_ne=None,
+        detection_ne=None,
+        stamp_s=None,
+    ):
         stamp_s = float(stamp_s if stamp_s is not None else track.get("stamp_s", time.time()))
         pos_ne = np.asarray(track["pos_ne"], dtype=float).reshape(2).copy()
         vel_ne = np.asarray(track.get("vel_ne", [0.0, 0.0]), dtype=float).reshape(2).copy()
         if not np.isfinite(vel_ne).all():
             vel_ne = np.zeros(2, dtype=float)
 
-        if not np.isfinite(radius_m) or float(radius_m) <= 0.0:
-            radius_m = track.get("radius_m", self.obstacle_min_equivalent_radius_m)
-        radius_m = max(float(radius_m), self.obstacle_min_equivalent_radius_m)
+        pc1_m = float(pc1_m) if np.isfinite(pc1_m) and pc1_m > 0.0 else float(track.get("pc1_m", self.obstacle_min_pc1_m))
+        pc2_m = float(pc2_m) if np.isfinite(pc2_m) and pc2_m > 0.0 else float(track.get("pc2_m", self.obstacle_min_pc2_m))
+        track["pc1_m"] = max(pc1_m, self.obstacle_min_pc1_m)
+        track["pc2_m"] = max(min(pc2_m, track["pc1_m"]), self.obstacle_min_pc2_m)
+
+        if length_axis_ne is not None:
+            length_axis_ne = np.asarray(length_axis_ne, dtype=float).reshape(2)
+            axis_norm = float(np.linalg.norm(length_axis_ne))
+            if np.isfinite(length_axis_ne).all() and axis_norm >= 1e-6:
+                length_axis_ne = length_axis_ne / axis_norm
+                previous_axis = np.asarray(track.get("length_axis_ne", length_axis_ne), dtype=float).reshape(2)
+                if float(np.dot(length_axis_ne, previous_axis)) < 0.0:
+                    length_axis_ne = -length_axis_ne
+                track["length_axis_ne"] = length_axis_ne
 
         history = track.setdefault("history_ne", [])
         history.append(pos_ne)
         if len(history) > self.obstacle_history_len:
             del history[:-self.obstacle_history_len]
+
+        if detection_ne is not None:
+            detection_ne = np.asarray(detection_ne, dtype=float).reshape(2)
+            if np.isfinite(detection_ne).all():
+                lidar_history = track.setdefault("lidar_history_ne", [])
+                lidar_history.append(detection_ne.copy())
+                if len(lidar_history) > self.obstacle_history_len:
+                    del lidar_history[:-self.obstacle_history_len]
 
         speed_m_s = float(np.linalg.norm(vel_ne))
         heading_rad = float(np.arctan2(vel_ne[1], vel_ne[0])) if speed_m_s >= self.apf_dynamic_speed_threshold_m_s else np.nan
@@ -1072,7 +1423,8 @@ class LaptopController:
             "vel_ne": vel_ne,
             "speed_m_s": speed_m_s,
             "heading_rad": heading_rad,
-            "radius_m": radius_m,
+            "pc1_m": track["pc1_m"],
+            "pc2_m": track["pc2_m"],
         })
 
         cutoff_s = stamp_s - max(float(self.obstacle_stats_window_s), 0.0)
@@ -1098,8 +1450,10 @@ class LaptopController:
             track["heading_mean_rad"] = np.nan
             track["heading_var_rad2"] = np.nan
             track["heading_circular_variance"] = np.nan
-            track["radius_mean_m"] = track.get("radius_m", self.obstacle_min_equivalent_radius_m)
-            track["radius_var_m2"] = 0.0
+            track["pc1_mean_m"] = track.get("pc1_m", self.obstacle_min_pc1_m)
+            track["pc2_mean_m"] = track.get("pc2_m", self.obstacle_min_pc2_m)
+            track["pc1_var_m2"] = 0.0
+            track["pc2_var_m2"] = 0.0
             track["accel_ne"] = np.zeros(2, dtype=float)
             track["accel_var_ne"] = np.zeros(2, dtype=float)
             track["motion_stable"] = False
@@ -1153,17 +1507,25 @@ class LaptopController:
             track["heading_var_rad2"] = np.nan
             track["heading_circular_variance"] = np.nan
 
-        radii = np.asarray([sample["radius_m"] for sample in samples], dtype=float)
-        radii = radii[np.isfinite(radii) & (radii > 0.0)]
-        if len(radii) > 0:
-            radius_mean = max(float(np.mean(radii)), self.obstacle_min_equivalent_radius_m)
-            track["radius_mean_m"] = radius_mean
-            track["radius_var_m2"] = float(np.var(radii))
-            track["radius_m"] = radius_mean
-            track["equivalent_radius_m"] = radius_mean
-        else:
-            track["radius_mean_m"] = track.get("radius_m", self.obstacle_min_equivalent_radius_m)
-            track["radius_var_m2"] = 0.0
+        pc1_values = np.asarray([sample["pc1_m"] for sample in samples], dtype=float)
+        pc2_values = np.asarray([sample["pc2_m"] for sample in samples], dtype=float)
+        pc1_values = pc1_values[np.isfinite(pc1_values) & (pc1_values > 0.0)]
+        pc2_values = pc2_values[np.isfinite(pc2_values) & (pc2_values > 0.0)]
+        track["pc1_mean_m"] = (
+            max(float(np.mean(pc1_values)), self.obstacle_min_pc1_m)
+            if len(pc1_values) > 0
+            else float(track.get("pc1_m", self.obstacle_min_pc1_m))
+        )
+        track["pc2_mean_m"] = (
+            max(float(np.mean(pc2_values)), self.obstacle_min_pc2_m)
+            if len(pc2_values) > 0
+            else float(track.get("pc2_m", self.obstacle_min_pc2_m))
+        )
+        track["pc2_mean_m"] = min(track["pc2_mean_m"], track["pc1_mean_m"])
+        track["pc1_var_m2"] = float(np.var(pc1_values)) if len(pc1_values) > 0 else 0.0
+        track["pc2_var_m2"] = float(np.var(pc2_values)) if len(pc2_values) > 0 else 0.0
+        track["pc1_m"] = track["pc1_mean_m"]
+        track["pc2_m"] = track["pc2_mean_m"]
 
         velocity_samples = [
             sample for sample in samples
@@ -1207,25 +1569,15 @@ class LaptopController:
         obstacle["heading_deg"] = float(track.get("heading_deg", np.nan))
         obstacle["heading_mean_rad"] = float(track.get("heading_mean_rad", np.nan))
         obstacle["heading_var_rad2"] = float(track.get("heading_var_rad2", np.nan))
-        obstacle["radius_mean_m"] = float(track.get("radius_mean_m", track.get("radius_m", self.obstacle_min_equivalent_radius_m)))
-        obstacle["radius_var_m2"] = float(track.get("radius_var_m2", 0.0))
+        obstacle["pc1_m"] = float(track.get("pc1_mean_m", track.get("pc1_m", self.obstacle_min_pc1_m)))
+        obstacle["pc2_m"] = float(track.get("pc2_mean_m", track.get("pc2_m", self.obstacle_min_pc2_m)))
+        obstacle["pc1_var_m2"] = float(track.get("pc1_var_m2", 0.0))
+        obstacle["pc2_var_m2"] = float(track.get("pc2_var_m2", 0.0))
+        obstacle["length_axis_ne"] = np.asarray(
+            track.get("heading_axis_ne", track.get("length_axis_ne", [1.0, 0.0])),
+            dtype=float,
+        ).reshape(2).tolist()
         obstacle["equivalent_radius_m"] = float(track.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m))
-        obstacle["safety_radius_m"] = (
-            self.apf_cluster_influence_scale * obstacle["equivalent_radius_m"]
-        )
-        obstacle["influence_radius_m"] = obstacle["safety_radius_m"]
-        obstacle["activation_radius_m"] = (
-            obstacle["safety_radius_m"]
-            + self.apf_safety_activation_margin_cluster_scale
-            * obstacle["equivalent_radius_m"]
-        )
-        obstacle["dcpa_threshold_m"] = (
-            self.apf_dcpa_cluster_scale * obstacle["equivalent_radius_m"]
-        )
-        obstacle["too_close_threshold_m"] = (
-            self.apf_too_close_cluster_scale
-            * obstacle["equivalent_radius_m"]
-        )
         obstacle["stats_sample_count"] = int(track.get("stats_sample_count", 0))
         obstacle["motion_stable"] = bool(track.get("motion_stable", False))
         obstacle["prediction_model"] = track.get("prediction_model", "ekf_constant_velocity")
@@ -1239,7 +1591,7 @@ class LaptopController:
         ]
 
     def update_apf_obstacle_tracks(self, stamp_s):
-        if not ENABLE_OBSTACLE_EKF_PREDICTION:
+        if not self.obstacle_ekf_prediction_enabled:
             self.apf_obstacle_tracks = []
             self.apf_virtual_obstacles = []
             tracked_fields = {
@@ -1255,8 +1607,10 @@ class LaptopController:
                 "heading_deg",
                 "heading_mean_rad",
                 "heading_var_rad2",
-                "radius_mean_m",
-                "radius_var_m2",
+                "pc1_m",
+                "pc2_m",
+                "pc1_var_m2",
+                "pc2_var_m2",
                 "stats_sample_count",
                 "motion_stable",
                 "prediction_model",
@@ -1273,10 +1627,15 @@ class LaptopController:
         for obstacle_index, obstacle in enumerate(self.lidar_obstacles):
             centre_ne = np.asarray(obstacle.get("centre_ne", [np.nan, np.nan]), dtype=float).reshape(2)
             if np.isfinite(centre_ne).all():
-                radius_m = float(obstacle.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m))
-                if not np.isfinite(radius_m) or radius_m <= 0.0:
-                    radius_m = self.obstacle_min_equivalent_radius_m
-                detections.append((obstacle_index, centre_ne, radius_m))
+                pc1_m = float(obstacle.get("pc1_m", self.obstacle_min_pc1_m))
+                pc2_m = float(obstacle.get("pc2_m", self.obstacle_min_pc2_m))
+                length_axis_ne = np.asarray(
+                    obstacle.get("length_axis_ne", [1.0, 0.0]),
+                    dtype=float,
+                ).reshape(2)
+                detections.append(
+                    (obstacle_index, centre_ne, pc1_m, pc2_m, length_axis_ne)
+                )
 
         if not detections:
             for track in self.apf_obstacle_tracks:
@@ -1286,8 +1645,10 @@ class LaptopController:
             self.prune_obstacle_tracks(now)
             return
 
-        detection_positions = np.asarray([detection for _, detection, _ in detections], dtype=float)
-        detection_radii = np.asarray([radius for _, _, radius in detections], dtype=float)
+        detection_positions = np.asarray(
+            [detection for _, detection, _, _, _ in detections],
+            dtype=float,
+        )
         predicted_tracks = []
         candidates = []
 
@@ -1334,7 +1695,10 @@ class LaptopController:
             self.sync_obstacle_track_fields(track)
             self.append_obstacle_track_history(
                 track,
-                radius_m=detection_radii[detection_index],
+                pc1_m=detections[detection_index][2],
+                pc2_m=detections[detection_index][3],
+                length_axis_ne=detections[detection_index][4],
+                detection_ne=detection,
                 stamp_s=now,
             )
             assigned_tracks.add(track_index)
@@ -1354,23 +1718,29 @@ class LaptopController:
             if detection_index in assigned_detections:
                 continue
 
-            _, detection_ne, radius_m = detection
-            track = self.make_obstacle_track(detection_ne, now, radius_m=radius_m)
+            _, detection_ne, pc1_m, pc2_m, length_axis_ne = detection
+            track = self.make_obstacle_track(
+                detection_ne,
+                now,
+                pc1_m=pc1_m,
+                pc2_m=pc2_m,
+                length_axis_ne=length_axis_ne,
+            )
             self.apf_obstacle_tracks.append(track)
             assigned_detections.add(detection_index)
             detection_track[detection_index] = track
 
         for detection_index, track in detection_track.items():
-            obstacle_index, _, _ = detections[detection_index]
+            obstacle_index, _, _, _, _ = detections[detection_index]
             self.annotate_lidar_obstacle_with_track(self.lidar_obstacles[obstacle_index], track)
 
         self.prune_obstacle_tracks(now)
 
     def obstacle_track_visuals(self):
-        if not ENABLE_OBSTACLE_EKF_PREDICTION:
+        if not self.obstacle_ekf_prediction_enabled:
             return []
 
-        now = float(self.lidar_timestamp_s if self.lidar_timestamp_s is not None else time.time())
+        now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
         visuals = []
 
         for track in self.apf_obstacle_tracks:
@@ -1395,15 +1765,12 @@ class LaptopController:
             prediction_track["state"] = state
             prediction_track["velocity_mean_ne"] = velocity_ne
             prediction_ne = self.obstacle_track_prediction_ne(prediction_track)
-            if len(prediction_ne) > 1:
-                virtual_position_ne = prediction_ne[1].copy()
-            elif len(prediction_ne) == 1:
-                virtual_position_ne = prediction_ne[0].copy()
-            else:
-                virtual_position_ne = state[0:2].copy()
             history_ne = np.asarray(track.get("history_ne", []), dtype=float)
             if history_ne.ndim != 2 or history_ne.shape[1] != 2:
                 history_ne = np.empty((0, 2), dtype=float)
+            lidar_history_ne = np.asarray(track.get("lidar_history_ne", []), dtype=float)
+            if lidar_history_ne.ndim != 2 or lidar_history_ne.shape[1] != 2:
+                lidar_history_ne = np.empty((0, 2), dtype=float)
 
             visuals.append({
                 "id": int(track["id"]),
@@ -1413,15 +1780,18 @@ class LaptopController:
                 "heading_rad": heading_rad,
                 "heading_deg": float(np.rad2deg(heading_rad)) if np.isfinite(heading_rad) else np.nan,
                 "prediction_ne": prediction_ne.copy(),
-                # This display-only point is available from the first LiDAR
-                # association; APF motion-stability gates remain unchanged.
-                "virtual_position_ne": virtual_position_ne,
                 "history_ne": history_ne.copy(),
+                "lidar_history_ne": lidar_history_ne.copy(),
                 "accel_ne": np.asarray(track.get("accel_ne", [0.0, 0.0]), dtype=float).reshape(2).copy(),
                 "speed_var_m2_s2": float(track.get("speed_var_m2_s2", 0.0)),
                 "heading_var_rad2": float(track.get("heading_var_rad2", np.nan)),
-                "radius_mean_m": float(track.get("radius_mean_m", track.get("radius_m", self.obstacle_min_equivalent_radius_m))),
-                "radius_var_m2": float(track.get("radius_var_m2", 0.0)),
+                "pc1_m": float(track.get("pc1_mean_m", track.get("pc1_m", self.obstacle_min_pc1_m))),
+                "pc2_m": float(track.get("pc2_mean_m", track.get("pc2_m", self.obstacle_min_pc2_m))),
+                "virtual_position_ne": np.asarray(
+                    track.get("virtual_position_ne", [np.nan, np.nan]),
+                    dtype=float,
+                ).reshape(2).copy(),
+                "collision_time_s": float(track.get("collision_time_s", np.nan)),
                 "prediction_model": track.get("prediction_model", "ekf_constant_velocity"),
                 "stats_sample_count": int(track.get("stats_sample_count", 0)),
                 "motion_stable": bool(track.get("motion_stable", False)),
@@ -1431,48 +1801,15 @@ class LaptopController:
 
         return visuals
 
-    def virtual_collision_visuals(self):
-        """Return finite APF virtual collision positions for show_laptop."""
-        visuals = []
-        for obstacle in self.apf_virtual_obstacles:
-            if not bool(obstacle.get("predicted_risk_active", False)):
-                continue
-
-            collision_position_ne = np.asarray(
-                obstacle.get(
-                    "obstacle_prediction_ne",
-                    obstacle.get("centre_ne", [np.nan, np.nan]),
-                ),
-                dtype=float,
-            ).reshape(2)
-            if not np.isfinite(collision_position_ne).all():
-                continue
-
-            visuals.append({
-                "track_id": int(obstacle.get("track_id", 0)),
-                "collision_position_ne": collision_position_ne.copy(),
-                "own_prediction_ne": np.asarray(
-                    obstacle.get("own_prediction_ne", [np.nan, np.nan]),
-                    dtype=float,
-                ).reshape(2),
-                "tcpa_s": float(obstacle.get("tcpa_s", np.nan)),
-                "predicted_separation_m": float(
-                    obstacle.get("predicted_separation_m", np.nan)
-                ),
-                "safety_radius_m": float(obstacle.get("safety_radius_m", np.nan)),
-            })
-
-        return visuals
-
     def apf_track_for_obstacle(self, obstacle):
-        if not ENABLE_OBSTACLE_EKF_PREDICTION:
+        if not self.obstacle_ekf_prediction_enabled:
             return None
 
         centre_ne = np.asarray(obstacle.get("centre_ne", [np.nan, np.nan]), dtype=float).reshape(2)
         if not np.isfinite(centre_ne).all():
             return None
 
-        now = float(self.lidar_timestamp_s if self.lidar_timestamp_s is not None else time.time())
+        now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
         best_track = None
         best_distance = np.inf
 
@@ -1497,8 +1834,136 @@ class LaptopController:
 
         return None
 
+    def obstacle_pc_dimensions(self, obstacle):
+        pc1_m = float(obstacle.get("pc1_m", self.obstacle_min_pc1_m))
+        pc2_m = float(obstacle.get("pc2_m", self.obstacle_min_pc2_m))
+        if not np.isfinite(pc1_m) or pc1_m <= 0.0:
+            pc1_m = self.obstacle_min_pc1_m
+        if not np.isfinite(pc2_m) or pc2_m <= 0.0:
+            pc2_m = self.obstacle_min_pc2_m
+        pc1_m = max(pc1_m, self.obstacle_min_pc1_m)
+        pc2_m = max(min(pc2_m, pc1_m), self.obstacle_min_pc2_m)
+        return pc1_m, pc2_m
+
+    def obstacle_length_axis_ne(self, obstacle):
+        axis_ne = np.asarray(
+            obstacle.get("length_axis_ne", [1.0, 0.0]),
+            dtype=float,
+        ).reshape(2)
+        axis_norm = float(np.linalg.norm(axis_ne))
+        if not np.isfinite(axis_ne).all() or axis_norm < 1e-6:
+            return np.array([1.0, 0.0], dtype=float)
+        return axis_ne / axis_norm
+
+    def apf_uses_cluster_range(self):
+        return bool(getattr(self, "apf_cluster_range_enabled", True))
+
+    def apf_classic_qstar_m(self):
+        return max(
+            float(getattr(self, "apf_classic_influence_distance_m", 3.0)),
+            1e-3,
+        )
+
+    def apf_point_level_and_away(
+        self,
+        offset,
+        obstacle,
+        pc_scale,
+        length_axis,
+    ):
+        offset = np.asarray(offset, dtype=float).reshape(2)
+        length_axis = np.asarray(length_axis, dtype=float).reshape(2)
+
+        if not self.apf_uses_cluster_range():
+            distance_m = float(np.linalg.norm(offset))
+            axis_norm = float(np.linalg.norm(length_axis))
+            fallback_away = (
+                -length_axis / axis_norm
+                if np.isfinite(length_axis).all() and axis_norm >= 1e-6
+                else np.array([-1.0, 0.0], dtype=float)
+            )
+            away = (
+                offset / distance_m
+                if distance_m >= 1e-6
+                else fallback_away
+            )
+            return distance_m / self.apf_classic_qstar_m(), away
+
+        pc1_m, pc2_m = self.obstacle_pc_dimensions(obstacle)
+        return ellipse_level_and_away(
+            offset,
+            length_axis,
+            0.5 * pc_scale * pc1_m + self.apf_own_equivalent_radius_m,
+            0.5 * pc_scale * pc2_m + self.apf_own_equivalent_radius_m,
+        )
+
+    def apf_repulsive_weight(self, field_level):
+        if self.apf_uses_cluster_range():
+            return linear_field_weight(field_level)
+        qstar_m = self.apf_classic_qstar_m()
+        return classic_apf_repulsive_gradient_weight(
+            float(field_level) * qstar_m,
+            qstar_m,
+        )
+
+    def apf_direction_clearance_m(self, obstacle):
+        if not self.apf_uses_cluster_range():
+            return self.apf_classic_qstar_m()
+        _, pc2_m = self.obstacle_pc_dimensions(obstacle)
+        return 0.5 * self.apf_direction_pc_scale * pc2_m
+
+    def apf_obstacle_level_and_away(self, obstacle, pc_scale):
+        is_segment = bool(obstacle.get("virtual", False)) and (
+            "segment_start_ne" in obstacle and "segment_end_ne" in obstacle
+        )
+
+        if is_segment:
+            start_body = self.earth_point_to_body(obstacle["segment_start_ne"])
+            end_body = self.earth_point_to_body(obstacle["segment_end_ne"])
+            segment = end_body - start_body
+            segment_norm = float(np.linalg.norm(segment))
+            if segment_norm >= 1e-6:
+                axis_body = segment / segment_norm
+                if self.apf_uses_cluster_range():
+                    pc1_m, pc2_m = self.obstacle_pc_dimensions(obstacle)
+                    extension_m = 0.5 * pc_scale * pc1_m
+                    start_body = start_body - extension_m * axis_body
+                    end_body = end_body + extension_m * axis_body
+                    corridor_radius_m = (
+                        0.5 * pc_scale * pc2_m
+                        + self.apf_own_equivalent_radius_m
+                    )
+                else:
+                    corridor_radius_m = self.apf_classic_qstar_m()
+                closest_body = closest_point_on_segment(
+                    np.zeros(2, dtype=float),
+                    start_body,
+                    end_body,
+                )
+                offset = -closest_body
+                distance_m = float(np.linalg.norm(offset))
+                level = distance_m / max(corridor_radius_m, 1e-6)
+                away = (
+                    offset / distance_m
+                    if distance_m >= 1e-6
+                    else -axis_body
+                )
+                return level, away
+
+        centre_body = np.asarray(
+            obstacle.get("centre_body", [np.nan, np.nan]),
+            dtype=float,
+        ).reshape(2)
+        axis_body = self.earth_vector_to_body(self.obstacle_length_axis_ne(obstacle))
+        return self.apf_point_level_and_away(
+            -centre_body,
+            obstacle,
+            pc_scale,
+            axis_body,
+        )
+
     def apf_cpa_metrics(self, obs_pos_body, obs_vel_body, own_vel_body):
-        if not ENABLE_OBSTACLE_EKF_PREDICTION:
+        if not self.obstacle_ekf_prediction_enabled:
             return np.nan, np.nan
 
         rel_vel = np.asarray(obs_vel_body, dtype=float).reshape(2) - np.asarray(own_vel_body, dtype=float).reshape(2)
@@ -1529,11 +1994,18 @@ class LaptopController:
         return -float(np.sign(lateral_speed))
 
     def own_prediction_velocity_ne(self):
-        own_vel_ne = np.asarray(self.v_robot[0:2], dtype=float).reshape(2)
-        if np.isfinite(own_vel_ne).all() and float(np.linalg.norm(own_vel_ne)) >= self.apf_dynamic_speed_threshold_m_s:
-            return own_vel_ne
-
-        return self.route_path_unit_ne * max(float(self.route_tracking_speed_m_s), self.apf_min_forward_speed)
+        current_ne = np.array([float(self.North), float(self.East)], dtype=float)
+        to_goal_ne = self.goal_ne - current_ne
+        to_goal_distance_m = float(np.linalg.norm(to_goal_ne))
+        route_direction_ne = (
+            to_goal_ne / to_goal_distance_m
+            if self.final_approach_active(to_goal_distance_m) and to_goal_distance_m >= 1e-6
+            else self.route_path_unit_ne
+        )
+        return route_direction_ne * max(
+            float(self.route_tracking_speed_m_s),
+            self.apf_min_forward_speed,
+        )
 
     def obstacle_track_state_at(self, track, dt_s):
         dt_s = max(float(dt_s), 0.0)
@@ -1557,102 +2029,92 @@ class LaptopController:
 
     def update_apf_virtual_obstacles(self):
         self.apf_virtual_obstacles = []
-        if not ENABLE_OBSTACLE_EKF_PREDICTION:
+        if not self.obstacle_ekf_prediction_enabled:
             return self.apf_virtual_obstacles
 
-        now = float(self.lidar_timestamp_s if self.lidar_timestamp_s is not None else time.time())
+        now = float(self.latest_lidar_received_s if self.latest_lidar_received_s is not None else time.time())
         own_pos_ne = np.array([float(self.North), float(self.East)], dtype=float)
         own_vel_ne = self.own_prediction_velocity_ne()
 
         if not np.isfinite(own_pos_ne).all() or not np.isfinite(own_vel_ne).all():
             return self.apf_virtual_obstacles
 
-        step_s = max(float(self.apf_prediction_dt_s), 1e-3)
-        horizon_s = max(float(self.apf_collision_horizon_s), step_s)
-        times = np.arange(step_s, horizon_s + 0.5 * step_s, step_s, dtype=float)
-
         for track in self.apf_obstacle_tracks:
+            track["collision_time_s"] = np.nan
+            track["virtual_position_ne"] = np.array([np.nan, np.nan], dtype=float)
+            track["prediction_ne"] = np.empty((0, 2), dtype=float)
             if now - float(track.get("last_seen_s", track.get("stamp_s", now))) > self.apf_track_timeout_s:
                 continue
             if not self.obstacle_track_motion_is_stable(track):
                 continue
 
-            speed_m_s = float(track.get("speed_mean_m_s", track.get("speed_m_s", 0.0)))
-            radius_m = float(track.get("radius_mean_m", track.get("radius_m", self.obstacle_min_equivalent_radius_m)))
-            if not np.isfinite(radius_m) or radius_m <= 0.0:
-                radius_m = self.obstacle_min_equivalent_radius_m
-            radius_m = max(radius_m, self.obstacle_min_equivalent_radius_m)
-
-            obs_positions = []
-            obs_velocities = []
-            own_positions = []
-            usable_times = []
-            for dt_s in times:
-                obs_pos_ne, obs_vel_ne = self.obstacle_track_state_at(track, dt_s)
-                if obs_pos_ne is None:
-                    continue
-                obs_positions.append(obs_pos_ne)
-                obs_velocities.append(obs_vel_ne)
-                own_positions.append(own_pos_ne + own_vel_ne * dt_s)
-                usable_times.append(dt_s)
-
-            if not obs_positions:
-                continue
-
-            obs_positions = np.asarray(obs_positions, dtype=float)
-            obs_velocities = np.asarray(obs_velocities, dtype=float)
-            own_positions = np.asarray(own_positions, dtype=float)
-            usable_times = np.asarray(usable_times, dtype=float)
-            separations = np.linalg.norm(obs_positions - own_positions, axis=1)
-
-            radius_std_m = float(np.sqrt(max(float(track.get("radius_var_m2", 0.0)), 0.0)))
-            speed_std_m_s = float(np.sqrt(max(float(track.get("speed_var_m2_s2", 0.0)), 0.0)))
-            heading_var = float(track.get("heading_var_rad2", 0.0))
-            heading_std_rad = float(np.sqrt(max(heading_var, 0.0))) if np.isfinite(heading_var) else 0.0
-
-            uncertainty_m = (
-                radius_std_m
-                + speed_std_m_s * usable_times
-                + speed_m_s * heading_std_rad * usable_times
-            )
-            safety_radius_m = max(self.apf_cluster_influence_scale * radius_m, 1e-3)
-            activation_radius_m = safety_radius_m + (
-                self.apf_safety_activation_margin_cluster_scale * radius_m
-            )
-            uncertainty_m = np.minimum(uncertainty_m, safety_radius_m)
-            # A predicted obstacle enters the virtual-obstacle set when the
-            # predicted own/obstacle separation enters the same safety range
-            # used by the measured LiDAR cluster.
-            collision_margin_m = np.full_like(
-                separations,
-                safety_radius_m,
+            current_obs_pos_ne = np.asarray(
+                track.get("pos_ne", [np.nan, np.nan]),
                 dtype=float,
+            ).reshape(2)
+            lidar_history_ne = track.get("lidar_history_ne", [])
+            cluster_centre_ne = (
+                np.asarray(lidar_history_ne[-1], dtype=float).reshape(2)
+                if lidar_history_ne
+                else current_obs_pos_ne
             )
-            risk_indices = np.flatnonzero(separations <= collision_margin_m)
-            if len(risk_indices) == 0:
+            current_obs_vel_ne = np.asarray(
+                track.get("velocity_mean_ne", track.get("vel_ne", [0.0, 0.0])),
+                dtype=float,
+            ).reshape(2)
+            if (
+                not np.isfinite(current_obs_pos_ne).all()
+                or not np.isfinite(current_obs_vel_ne).all()
+            ):
                 continue
 
-            risk_index = int(risk_indices[0])
-            own_prediction_ne = own_positions[risk_index]
-            obstacle_prediction_ne = obs_positions[risk_index]
+            relative_position_ne = current_obs_pos_ne - own_pos_ne
+            relative_velocity_ne = current_obs_vel_ne - own_vel_ne
+            relative_speed_sq = float(np.dot(relative_velocity_ne, relative_velocity_ne))
+            if relative_speed_sq < 1e-9:
+                continue
 
-            # The virtual obstacle is the obstacle's EKF-predicted position at
-            # the first future safety-range intrusion. The own-ship prediction
-            # is used only to detect that intrusion; no midpoint is used.
+            collision_time_s = -float(
+                np.dot(relative_position_ne, relative_velocity_ne)
+            ) / relative_speed_sq
+            if (
+                collision_time_s <= 0.0
+                or collision_time_s > self.apf_collision_horizon_s
+            ):
+                continue
+
+            obstacle_prediction_ne, obstacle_velocity_ne = (
+                self.obstacle_track_state_at(track, collision_time_s)
+            )
+            if obstacle_prediction_ne is None:
+                continue
+            own_prediction_ne = own_pos_ne + own_vel_ne * collision_time_s
+            separation_ne = own_prediction_ne - obstacle_prediction_ne
+
+            pc1_m = float(track.get("pc1_mean_m", track.get("pc1_m", self.obstacle_min_pc1_m)))
+            pc2_m = float(track.get("pc2_mean_m", track.get("pc2_m", self.obstacle_min_pc2_m)))
+            length_axis_ne = np.asarray(
+                track.get("heading_axis_ne", track.get("length_axis_ne", [1.0, 0.0])),
+                dtype=float,
+            ).reshape(2)
+            risk_level, _ = self.apf_point_level_and_away(
+                separation_ne,
+                track,
+                self.apf_risk_pc_scale,
+                length_axis_ne,
+            )
+            if risk_level > 1.0:
+                continue
+
             centre_body = self.earth_point_to_body(obstacle_prediction_ne)
             if not np.isfinite(centre_body).all():
                 continue
 
+            angle_rad = abs(wrap_angle(float(np.arctan2(centre_body[1], centre_body[0]))))
+            if angle_rad > self.apf_activation_front_half_angle_rad:
+                continue
+
             distance_m = max(float(np.linalg.norm(centre_body)), 1e-3)
-            current_obs_pos_ne = np.asarray(track.get("pos_ne", obs_positions[risk_index]), dtype=float).reshape(2)
-            if not np.isfinite(current_obs_pos_ne).all():
-                current_obs_pos_ne = obs_positions[risk_index]
-            current_obs_vel_ne = np.asarray(
-                track.get("velocity_mean_ne", track.get("vel_ne", obs_velocities[risk_index])),
-                dtype=float,
-            ).reshape(2)
-            if not np.isfinite(current_obs_vel_ne).all():
-                current_obs_vel_ne = obs_velocities[risk_index]
 
             encounter, requested_side, rule = "dynamic_virtual_obstacle", 0.0, "predicted collision point"
             current_obs_body = self.earth_point_to_body(current_obs_pos_ne)
@@ -1669,38 +2131,35 @@ class LaptopController:
                     current_own_vel_body,
                 )
 
+            track["collision_time_s"] = collision_time_s
+            track["virtual_position_ne"] = obstacle_prediction_ne.copy()
+            track["prediction_ne"] = self.obstacle_track_prediction_ne(track)
             self.apf_virtual_obstacles.append({
                 "label": -1000 - int(track.get("id", 0)),
                 "virtual": True,
                 "predicted_risk_active": True,
-                "virtual_type": "predicted_obstacle_position",
+                "virtual_type": "predicted_trajectory_segment",
                 "track_id": int(track.get("id", 0)),
                 "centre_body": centre_body.tolist(),
                 "centre_ne": obstacle_prediction_ne.tolist(),
+                "segment_start_ne": cluster_centre_ne.tolist(),
+                "segment_end_ne": obstacle_prediction_ne.tolist(),
+                "obstacle_prediction_ne": obstacle_prediction_ne.tolist(),
+                "own_prediction_ne": own_prediction_ne.tolist(),
+                "collision_position_ne": (
+                    0.5 * (obstacle_prediction_ne + own_prediction_ne)
+                ).tolist(),
                 "distance_m": distance_m,
                 "min_distance_m": distance_m,
-                "own_prediction_ne": own_prediction_ne.tolist(),
-                "obstacle_prediction_ne": obstacle_prediction_ne.tolist(),
-                "predicted_separation_m": float(separations[risk_index]),
-                "prediction_uncertainty_m": float(
-                    uncertainty_m[risk_index]
-                ),
-                "equivalent_radius_m": radius_m,
-                "safety_radius_m": safety_radius_m,
-                "influence_radius_m": safety_radius_m,
-                "activation_radius_m": activation_radius_m,
-                "velocity_ne": obs_velocities[risk_index].tolist(),
-                "speed_m_s": float(np.linalg.norm(obs_velocities[risk_index])),
-                "tcpa_s": float(usable_times[risk_index]),
-                "dcpa_m": float(separations[risk_index]),
-                "dcpa_threshold_m": float(
-                    self.apf_dcpa_cluster_scale * radius_m
-                ),
-                "too_close_threshold_m": float(
-                    self.apf_too_close_cluster_scale * radius_m
-                ),
-                "collision_margin_m": float(collision_margin_m[risk_index]),
-                "risk_range_source": "measured_cluster_safety_radius",
+                "pc1_m": pc1_m,
+                "pc2_m": pc2_m,
+                "length_axis_ne": length_axis_ne.tolist(),
+                "equivalent_radius_m": 0.5 * pc1_m,
+                "velocity_ne": obstacle_velocity_ne.tolist(),
+                "speed_m_s": float(np.linalg.norm(obstacle_velocity_ne)),
+                "tcpa_s": collision_time_s,
+                "dcpa_m": float(np.linalg.norm(separation_ne)),
+                "collision_level": risk_level,
                 "encounter_mode": encounter,
                 "requested_side": float(requested_side),
                 "colreg_rule": rule,
@@ -1709,259 +2168,29 @@ class LaptopController:
 
         return self.apf_virtual_obstacles
 
-    def apf_obstacle_track_id(self, obstacle):
-        try:
-            track_id = int(obstacle.get("track_id", 0))
-        except (TypeError, ValueError):
-            return None
-        return track_id if track_id > 0 else None
-
-    def apf_track_by_id(self, track_id):
-        if track_id is None:
-            return None
-        for track in self.apf_obstacle_tracks:
-            if int(track.get("id", 0)) == int(track_id):
-                return track
-        return None
-
-    def apf_overtaking_obstacle_ignored(self, obstacle):
-        now_s = (
-            float(self.timefromstart)
-            if self.timefromstart is not None
-            else 0.0
-        )
-        if now_s >= self.apf_overtaking_ignore_until_s:
-            self.apf_overtaking_completed_track_id = None
-            return False
-
-        return (
-            self.apf_obstacle_track_id(obstacle)
-            == self.apf_overtaking_completed_track_id
-        )
-
-    def apf_overtaking_candidate_is_route_aligned(self, obstacle):
-        obstacle_ne = np.asarray(
-            obstacle.get("centre_ne", [np.nan, np.nan]),
-            dtype=float,
-        ).reshape(2)
-        if not np.isfinite(obstacle_ne).all():
-            obstacle_body = np.asarray(
-                obstacle.get("centre_body", [np.nan, np.nan]),
+    def virtual_collision_visuals(self):
+        visuals = []
+        for obstacle in self.apf_virtual_obstacles:
+            if not bool(obstacle.get("predicted_risk_active", False)):
+                continue
+            collision_position_ne = np.asarray(
+                obstacle.get("collision_position_ne", [np.nan, np.nan]),
                 dtype=float,
             ).reshape(2)
-            if not np.isfinite(obstacle_body).all():
-                return False
-            obstacle_ne = self.body_point_to_earth(obstacle_body)
-
-        track = self.apf_track_by_id(
-            self.apf_obstacle_track_id(obstacle)
-        )
-        if track is not None:
-            obstacle_velocity_ne = np.asarray(
-                track.get(
-                    "velocity_mean_ne",
-                    track.get("vel_ne", [np.nan, np.nan]),
-                ),
-                dtype=float,
-            ).reshape(2)
-        else:
-            obstacle_velocity_ne = np.asarray(
-                obstacle.get("velocity_ne", [np.nan, np.nan]),
-                dtype=float,
-            ).reshape(2)
-        if not np.isfinite(obstacle_velocity_ne).all():
-            return False
-
-        route_normal_left_ne = np.array(
-            [self.route_path_unit_ne[1], -self.route_path_unit_ne[0]],
-            dtype=float,
-        )
-        own_ne = np.array(
-            [float(self.North), float(self.East)],
-            dtype=float,
-        )
-        obstacle_ahead_m = float(
-            np.dot(obstacle_ne - own_ne, self.route_path_unit_ne)
-        )
-        obstacle_forward_speed_m_s = float(
-            np.dot(obstacle_velocity_ne, self.route_path_unit_ne)
-        )
-        obstacle_cross_speed_m_s = abs(
-            float(np.dot(obstacle_velocity_ne, route_normal_left_ne))
-        )
-        max_cross_speed_m_s = max(
-            obstacle_forward_speed_m_s * np.tan(np.deg2rad(60.0)),
-            0.03,
-        )
-        return (
-            obstacle_ahead_m >= -self.apf_own_equivalent_radius_m
-            and obstacle_forward_speed_m_s > 0.0
-            and obstacle_cross_speed_m_s <= max_cross_speed_m_s
-        )
-
-    def activate_apf_overtaking(self, obstacle, requested_side):
-        track_id = self.apf_obstacle_track_id(obstacle)
-        if self.apf_overtaking_obstacle_ignored(obstacle):
-            return 0.0
-
-        if self.apf_overtaking_active:
-            if self.apf_overtaking_track_id is None and track_id is not None:
-                self.apf_overtaking_track_id = track_id
-            return self.apf_overtaking_side_sign
-
-        if not self.apf_overtaking_candidate_is_route_aligned(obstacle):
-            return 0.0
-
-        side_sign = float(np.sign(requested_side))
-        if side_sign == 0.0:
-            side_sign = 1.0
-
-        self.apf_overtaking_active = True
-        self.apf_overtaking_track_id = track_id
-        self.apf_overtaking_side_sign = side_sign
-        self.apf_overtaking_passed_since_s = None
-        self.apf_side_lock_sign = side_sign
-        self.apf_side_lock_active = True
-        self.apf_side_lock_authoritative = True
-        return side_sign
-
-    def stabilize_apf_overtaking_encounter(
-        self,
-        obstacle,
-        encounter,
-        requested_side,
-        rule,
-        authoritative,
-    ):
-        track_id = self.apf_obstacle_track_id(obstacle)
-        selected_track = (
-            self.apf_overtaking_track_id is None
-            or track_id == self.apf_overtaking_track_id
-        )
-
-        if self.apf_overtaking_active and selected_track:
-            if self.apf_overtaking_track_id is None and track_id is not None:
-                self.apf_overtaking_track_id = track_id
-            return (
-                "overtaking",
-                self.apf_overtaking_side_sign,
-                "COLREG Rule 13: fixed-side overtaking",
-            )
-
-        if encounter == "overtaking" and authoritative:
-            side_sign = self.activate_apf_overtaking(
-                obstacle,
-                requested_side,
-            )
-            if side_sign != 0.0:
-                return (
-                    "overtaking",
-                    side_sign,
-                    "COLREG Rule 13: fixed-side overtaking",
-                )
-
-        return encounter, requested_side, rule
-
-    def update_apf_overtaking_state(self):
-        if not self.apf_overtaking_active:
-            return False
-
-        track = self.apf_track_by_id(self.apf_overtaking_track_id)
-        if track is None:
-            self.apf_overtaking_passed_since_s = None
-            return False
-
-        obstacle_ne = np.asarray(
-            track.get("pos_ne", [np.nan, np.nan]),
-            dtype=float,
-        ).reshape(2)
-        obstacle_velocity_ne = np.asarray(
-            track.get(
-                "velocity_mean_ne",
-                track.get("vel_ne", [np.nan, np.nan]),
-            ),
-            dtype=float,
-        ).reshape(2)
-        own_ne = np.array(
-            [float(self.North), float(self.East)],
-            dtype=float,
-        )
-        own_velocity_ne = np.asarray(
-            self.v_robot[0:2],
-            dtype=float,
-        ).reshape(2)
-        if (
-            not np.isfinite(obstacle_ne).all()
-            or not np.isfinite(obstacle_velocity_ne).all()
-            or not np.isfinite(own_velocity_ne).all()
-        ):
-            self.apf_overtaking_passed_since_s = None
-            return False
-
-        route_normal_left_ne = np.array(
-            [self.route_path_unit_ne[1], -self.route_path_unit_ne[0]],
-            dtype=float,
-        )
-        relative_ne = own_ne - obstacle_ne
-        route_lead_m = float(
-            np.dot(relative_ne, self.route_path_unit_ne)
-        )
-        lateral_separation_m = abs(
-            float(np.dot(relative_ne, route_normal_left_ne))
-        )
-        separation_speed_m_s = float(
-            np.dot(
-                own_velocity_ne - obstacle_velocity_ne,
-                self.route_path_unit_ne,
-            )
-        )
-        obstacle_radius_m = self.apf_obstacle_equivalent_radius_m(track)
-        required_lead_m = (
-            self.apf_own_equivalent_radius_m
-            + obstacle_radius_m
-            + self.apf_overtaking_route_lead_margin_m
-        )
-        required_lateral_m = self.apf_obstacle_safety_radius_m(track)
-        safely_ahead = (
-            route_lead_m >= required_lead_m
-            and lateral_separation_m >= required_lateral_m
-            and separation_speed_m_s
-            >= self.apf_overtaking_min_separation_speed_m_s
-        )
-
-        now_s = (
-            float(self.timefromstart)
-            if self.timefromstart is not None
-            else 0.0
-        )
-        if not safely_ahead:
-            self.apf_overtaking_passed_since_s = None
-            return False
-
-        if self.apf_overtaking_passed_since_s is None:
-            self.apf_overtaking_passed_since_s = now_s
-            return False
-
-        if (
-            now_s - self.apf_overtaking_passed_since_s
-            < self.apf_overtaking_completion_hold_s
-        ):
-            return False
-
-        self.apf_overtaking_completed_track_id = (
-            self.apf_overtaking_track_id
-        )
-        self.apf_overtaking_ignore_until_s = (
-            now_s + self.apf_overtaking_ignore_s
-        )
-        self.apf_overtaking_active = False
-        self.apf_overtaking_track_id = None
-        self.apf_overtaking_side_sign = 0.0
-        self.apf_overtaking_passed_since_s = None
-        self.apf_side_lock_sign = 0.0
-        self.apf_side_lock_active = False
-        self.apf_side_lock_authoritative = False
-        return True
+            if not np.isfinite(collision_position_ne).all():
+                continue
+            visuals.append({
+                "track_id": int(obstacle.get("track_id", 0)),
+                "collision_position_ne": collision_position_ne.copy(),
+                "own_prediction_ne": np.asarray(
+                    obstacle.get("own_prediction_ne", [np.nan, np.nan]),
+                    dtype=float,
+                ).reshape(2),
+                "tcpa_s": float(obstacle.get("tcpa_s", np.nan)),
+                "predicted_separation_m": float(obstacle.get("dcpa_m", np.nan)),
+                "collision_level": float(obstacle.get("collision_level", np.nan)),
+            })
+        return visuals
 
     def apf_classify_encounter(self, obs_pos_body, obs_vel_body, own_vel_body):
         obs_pos_body = np.asarray(obs_pos_body, dtype=float).reshape(2)
@@ -2021,244 +2250,11 @@ class LaptopController:
         body_angle_rad = float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))
         return abs(wrap_angle(body_angle_rad)) <= self.apf_priority_front_half_angle_rad
 
-    def apf_obstacle_equivalent_radius_m(self, obstacle):
-        obstacle_radius_m = float(
-            obstacle.get("equivalent_radius_m", self.obstacle_min_equivalent_radius_m)
-        )
-        if not np.isfinite(obstacle_radius_m) or obstacle_radius_m <= 0.0:
-            obstacle_radius_m = self.obstacle_min_equivalent_radius_m
-        return max(obstacle_radius_m, 1e-3)
-
-    def apf_obstacle_safety_radius_m(self, obstacle):
-        obstacle_radius_m = self.apf_obstacle_equivalent_radius_m(obstacle)
-        safety_radius_m = float(
-            obstacle.get(
-                "safety_radius_m",
-                obstacle.get(
-                    "influence_radius_m",
-                    self.apf_cluster_influence_scale * obstacle_radius_m,
-                ),
-            )
-        )
-        if not np.isfinite(safety_radius_m) or safety_radius_m <= 0.0:
-            safety_radius_m = self.apf_cluster_influence_scale * obstacle_radius_m
-        return max(safety_radius_m, 1e-3)
-
-    def apf_obstacle_activation_radius_m(self, obstacle):
-        obstacle_radius_m = self.apf_obstacle_equivalent_radius_m(obstacle)
-        safety_radius_m = self.apf_obstacle_safety_radius_m(obstacle)
-        activation_radius_m = float(
-            obstacle.get(
-                "activation_radius_m",
-                safety_radius_m
-                + self.apf_safety_activation_margin_cluster_scale
-                * obstacle_radius_m,
-            )
-        )
-        if not np.isfinite(activation_radius_m):
-            activation_radius_m = (
-                safety_radius_m
-                + self.apf_safety_activation_margin_cluster_scale
-                * obstacle_radius_m
-            )
-        return max(activation_radius_m, safety_radius_m + 1e-3)
-
-    def apf_obstacle_dcpa_threshold_m(self, obstacle):
-        return self.apf_dcpa_cluster_scale * self.apf_obstacle_equivalent_radius_m(obstacle)
-
-    def apf_obstacle_too_close_threshold_m(self, obstacle):
-        return self.apf_too_close_cluster_scale * self.apf_obstacle_equivalent_radius_m(obstacle)
-
-    def apf_obstacle_side_lock_exit_margin_m(self, obstacle):
-        return self.apf_side_lock_exit_margin_cluster_scale * self.apf_obstacle_equivalent_radius_m(obstacle)
-
-    def apf_obstacle_direction_decision_radius_m(self, obstacle):
-        return self.apf_direction_decision_cluster_scale * self.apf_obstacle_equivalent_radius_m(obstacle)
-
-    def apf_early_direction_for_obstacle(self, obstacle, own_vel_body):
-        obs_pos_body = np.asarray(
-            obstacle.get("centre_body", [np.nan, np.nan]),
-            dtype=float,
-        ).reshape(2)
-        if not np.isfinite(obs_pos_body).all():
-            return 0.0, "none", "none", np.nan, np.nan, False
-
-        if bool(obstacle.get("virtual", False)):
-            requested_side = float(obstacle.get("requested_side", 0.0))
-            encounter = obstacle.get(
-                "encounter_mode",
-                "dynamic_virtual_obstacle",
-            )
-            rule = obstacle.get("colreg_rule", "predicted collision point")
-            tcpa_s = float(obstacle.get("tcpa_s", np.nan))
-            dcpa_m = float(obstacle.get("dcpa_m", np.nan))
-            encounter, requested_side, rule = (
-                self.stabilize_apf_overtaking_encounter(
-                    obstacle,
-                    encounter,
-                    requested_side,
-                    rule,
-                    authoritative=True,
-                )
-            )
-            if encounter == "head_on":
-                requested_side = -1.0
-            elif requested_side == 0.0:
-                requested_side = self.apf_default_side_from_obstacle(
-                    obs_pos_body
-                )
-            return (
-                requested_side,
-                encounter,
-                rule,
-                tcpa_s,
-                dcpa_m,
-                True,
-            )
-
-        obs_vel_body = np.zeros(2, dtype=float)
-        track = self.apf_track_for_obstacle(obstacle)
-        motion_stable = (
-            track is not None
-            and self.obstacle_track_motion_is_stable(track)
-        )
-        if motion_stable:
-            velocity_ne = np.asarray(
-                track.get("velocity_mean_ne", track.get("vel_ne", [0.0, 0.0])),
-                dtype=float,
-            ).reshape(2)
-            if np.isfinite(velocity_ne).all():
-                obs_vel_body = self.earth_vector_to_body(velocity_ne)
-
-        if ENABLE_OBSTACLE_EKF_PREDICTION and motion_stable:
-            tcpa_s, dcpa_m = self.apf_cpa_metrics(
-                obs_pos_body,
-                obs_vel_body,
-                own_vel_body,
-            )
-            encounter, requested_side, rule = self.apf_classify_encounter(
-                obs_pos_body,
-                obs_vel_body,
-                own_vel_body,
-            )
-            encounter, requested_side, rule = (
-                self.stabilize_apf_overtaking_encounter(
-                    obstacle,
-                    encounter,
-                    requested_side,
-                    rule,
-                    authoritative=motion_stable,
-                )
-            )
-            risk = (
-                tcpa_s <= self.apf_collision_horizon_s
-                and dcpa_m <= self.apf_obstacle_dcpa_threshold_m(obstacle)
-            )
-            if encounter == "crossing_from_port" and not risk:
-                requested_side = 0.0
-            elif requested_side == 0.0:
-                requested_side = self.apf_default_side_from_obstacle(
-                    obs_pos_body
-                )
-            return (
-                requested_side,
-                encounter,
-                rule,
-                tcpa_s,
-                dcpa_m,
-                encounter != "static_obstacle",
-            )
-
-        encounter, requested_side, rule = (
-            self.stabilize_apf_overtaking_encounter(
-                obstacle,
-                "static_obstacle",
-                self.apf_default_side_from_obstacle(obs_pos_body),
-                "early geometric direction",
-                authoritative=False,
-            )
-        )
-        return (
-            requested_side,
-            encounter,
-            rule,
-            np.nan,
-            np.nan,
-            encounter == "overtaking",
-        )
-
-    def apf_safety_corridor_target_ne(self, route_target_ne, obstacles, side_sign):
-        route_target_ne = np.asarray(route_target_ne, dtype=float).reshape(2)
-        side_sign = float(np.sign(side_sign))
-        if side_sign == 0.0 or not obstacles:
-            return route_target_ne.copy()
-
-        route_normal_left_ne = np.array(
-            [self.route_path_unit_ne[1], -self.route_path_unit_ne[0]],
-            dtype=float,
-        )
-        required_lateral_m = None
-
-        for obstacle in obstacles:
-            centre_ne = np.asarray(
-                obstacle.get("centre_ne", [np.nan, np.nan]),
-                dtype=float,
-            ).reshape(2)
-            if not np.isfinite(centre_ne).all():
-                centre_body = np.asarray(
-                    obstacle.get("centre_body", [np.nan, np.nan]),
-                    dtype=float,
-                ).reshape(2)
-                if not np.isfinite(centre_body).all():
-                    continue
-                centre_ne = self.body_point_to_earth(centre_body)
-
-            obstacle_lateral_m = float(
-                np.dot(centre_ne - self.start_ne, route_normal_left_ne)
-            )
-            safety_radius_m = self.apf_obstacle_safety_radius_m(obstacle)
-            candidate_lateral_m = (
-                obstacle_lateral_m + side_sign * safety_radius_m
-            )
-
-            if required_lateral_m is None:
-                required_lateral_m = candidate_lateral_m
-            elif side_sign > 0.0:
-                required_lateral_m = max(required_lateral_m, candidate_lateral_m)
-            else:
-                required_lateral_m = min(required_lateral_m, candidate_lateral_m)
-
-        if required_lateral_m is None:
-            return route_target_ne.copy()
-
-        return (
-            route_target_ne
-            + required_lateral_m * route_normal_left_ne
-        )
-
-    def apf_lock_side(
-        self,
-        requested_side,
-        obstacle_distance_m,
-        obstacle_influence_m,
-        obstacle_exit_margin_m,
-        authoritative=False,
-        force_override=False,
-    ):
+    def apf_lock_side(self, requested_side, obstacle_level):
         now_s = float(self.timefromstart) if self.timefromstart is not None else 0.0
-        if self.apf_overtaking_active:
-            self.apf_side_lock_sign = self.apf_overtaking_side_sign
-            self.apf_side_lock_until_s = now_s + self.apf_side_lock_s
-            self.apf_side_lock_active = True
-            self.apf_side_lock_authoritative = True
-            return self.apf_side_lock_sign
-
         obstacle_close = (
-            np.isfinite(obstacle_distance_m)
-            and np.isfinite(obstacle_influence_m)
-            and np.isfinite(obstacle_exit_margin_m)
-            and obstacle_distance_m
-            <= obstacle_influence_m + obstacle_exit_margin_m
+            np.isfinite(obstacle_level)
+            and obstacle_level <= self.apf_side_lock_exit_level
         )
 
         if requested_side == 0.0:
@@ -2268,40 +2264,9 @@ class LaptopController:
 
             self.apf_side_lock_sign = 0.0
             self.apf_side_lock_active = False
-            self.apf_side_lock_authoritative = False
             return 0.0
 
         requested_side = float(np.sign(requested_side))
-        if force_override:
-            self.apf_side_lock_sign = requested_side
-            self.apf_side_lock_until_s = now_s + self.apf_side_lock_s
-            self.apf_side_lock_active = True
-            self.apf_side_lock_authoritative = True
-            return self.apf_side_lock_sign
-
-        if (
-            self.apf_side_lock_sign != 0.0
-            and authoritative
-            and not self.apf_side_lock_authoritative
-            and requested_side == self.apf_side_lock_sign
-        ):
-            self.apf_side_lock_until_s = now_s + self.apf_side_lock_s
-            self.apf_side_lock_active = True
-            self.apf_side_lock_authoritative = True
-            return self.apf_side_lock_sign
-
-        if (
-            self.apf_side_lock_sign != 0.0
-            and authoritative
-            and not self.apf_side_lock_authoritative
-            and requested_side != self.apf_side_lock_sign
-        ):
-            self.apf_side_lock_sign = requested_side
-            self.apf_side_lock_until_s = now_s + self.apf_side_lock_s
-            self.apf_side_lock_active = True
-            self.apf_side_lock_authoritative = True
-            return self.apf_side_lock_sign
-
         if (
             self.apf_side_lock_sign != 0.0
             and (obstacle_close or now_s < self.apf_side_lock_until_s)
@@ -2312,37 +2277,18 @@ class LaptopController:
         self.apf_side_lock_sign = requested_side
         self.apf_side_lock_until_s = now_s + self.apf_side_lock_s
         self.apf_side_lock_active = True
-        self.apf_side_lock_authoritative = bool(authoritative)
         return self.apf_side_lock_sign
 
-    def refresh_apf_side_lock(
-        self,
-        nearest_forward_clearance_m=np.inf,
-        nearest_exit_margin_m=0.0,
-        release_when_clear=False,
-    ):
-        if self.apf_overtaking_active:
-            self.apf_side_lock_sign = self.apf_overtaking_side_sign
-            self.apf_side_lock_active = True
-            self.apf_side_lock_authoritative = True
-            return True
-
+    def refresh_apf_side_lock(self, nearest_forward_level=np.inf):
         if self.apf_side_lock_sign == 0.0:
             self.apf_side_lock_active = False
             return False
 
         now_s = float(self.timefromstart) if self.timefromstart is not None else 0.0
         obstacle_close = (
-            np.isfinite(nearest_forward_clearance_m)
-            and np.isfinite(nearest_exit_margin_m)
-            and nearest_forward_clearance_m <= nearest_exit_margin_m
+            np.isfinite(nearest_forward_level)
+            and nearest_forward_level <= self.apf_side_lock_exit_level
         )
-
-        if release_when_clear and not obstacle_close:
-            self.apf_side_lock_sign = 0.0
-            self.apf_side_lock_active = False
-            self.apf_side_lock_authoritative = False
-            return False
 
         if obstacle_close or now_s < self.apf_side_lock_until_s:
             self.apf_side_lock_active = True
@@ -2350,7 +2296,6 @@ class LaptopController:
 
         self.apf_side_lock_sign = 0.0
         self.apf_side_lock_active = False
-        self.apf_side_lock_authoritative = False
         return False
 
     def route_progress_and_point(self, lookahead_m=0.0):
@@ -2365,44 +2310,9 @@ class LaptopController:
         target_ne = self.start_ne + target_along_m * self.route_path_unit_ne
         return closest_along_m, target_ne
 
-    def route_cross_track_error_m(self):
-        if self.route_path_length_m < 1e-9:
-            return 0.0
-
-        current_ne = np.array([float(self.North), float(self.East)], dtype=float)
-        route_normal_left_ne = np.array(
-            [self.route_path_unit_ne[1], -self.route_path_unit_ne[0]],
-            dtype=float,
-        )
-        return float(
-            np.dot(current_ne - self.start_ne, route_normal_left_ne)
-        )
-
-    def update_path_recovery_state(self, final_approach=False):
-        if final_approach or self.route_path_length_m < 1e-9:
-            self.path_recovery_active = False
-            return False
-
-        cross_track_error_m = abs(self.route_cross_track_error_m())
-        route_heading_error_rad = abs(
-            wrap_angle(float(self.Yaw) - self.route_heading_rad)
-        )
-
-        if self.path_recovery_active:
-            if (
-                cross_track_error_m
-                <= self.recovery_exit_cross_track_error_m
-                and route_heading_error_rad
-                <= self.recovery_exit_heading_error_rad
-            ):
-                self.path_recovery_active = False
-        elif cross_track_error_m >= self.recovery_enter_cross_track_error_m:
-            self.path_recovery_active = True
-
-        return self.path_recovery_active
-
     def goal_distance_m(self):
-        return float(np.linalg.norm(self.goal_ne - [self.North, self.East]))
+        current_ne = np.array([float(self.North), float(self.East)], dtype=float)
+        return float(np.linalg.norm(self.goal_ne - current_ne))
 
     def final_approach_active(self, final_distance_m=None):
         if final_distance_m is None:
@@ -2471,88 +2381,32 @@ class LaptopController:
                 track_velocity_ne = np.asarray(track["vel_ne"], dtype=float).reshape(2)
             obs_vel_body = self.earth_vector_to_body(track_velocity_ne)
 
-        centre_distance_m = max(float(np.linalg.norm(obs_pos_body)), 1e-3)
-        if is_virtual:
-            distance_m = centre_distance_m
-        else:
-            # Keep the nearest measured point for collision-risk decisions, but
-            # define the potential field around the cluster centre.
-            distance_m = max(
-                float(obstacle.get("min_distance_m", centre_distance_m)),
-                1e-3,
-            )
-
+        distance_m = max(float(np.linalg.norm(obs_pos_body)), 1e-3)
         obs_dir = obs_pos_body / max(float(np.linalg.norm(obs_pos_body)), 1e-3)
-        away_dir = -obs_dir
         rel_vel_body = np.asarray(own_vel_body, dtype=float).reshape(2) - obs_vel_body
         closing_speed = float(np.dot(rel_vel_body, obs_dir))
         rel_speed = float(np.linalg.norm(rel_vel_body))
         pass_astern_side = self.apf_pass_astern_side_from_velocity(obs_vel_body)
-        safety_radius_m = self.apf_obstacle_safety_radius_m(obstacle)
-        activation_radius_m = self.apf_obstacle_activation_radius_m(obstacle)
-        dcpa_threshold_m = self.apf_obstacle_dcpa_threshold_m(obstacle)
-        too_close_threshold_m = self.apf_obstacle_too_close_threshold_m(obstacle)
+        field_scale = (
+            self.apf_virtual_pc_scale
+            if is_virtual
+            else self.apf_avoidance_pc_scale
+        )
+        field_level, away_dir = self.apf_obstacle_level_and_away(
+            obstacle,
+            field_scale,
+        )
+        direction_level, _ = self.apf_obstacle_level_and_away(
+            obstacle,
+            self.apf_direction_pc_scale,
+        )
 
         obstacle_angle = abs(wrap_angle(float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))))
         in_front_sector = obstacle_angle <= self.apf_activation_front_half_angle_rad
-        inside_safety_boundary = centre_distance_m < safety_radius_m
-        predicted_risk_active = (
-            is_virtual
-            and bool(obstacle.get("predicted_risk_active", True))
-        )
-        active = (
-            predicted_risk_active
-            or inside_safety_boundary
-            or (
-                centre_distance_m < activation_radius_m
-                and (in_front_sector or is_virtual)
-            )
-        )
+        active = field_level <= 1.0 and (in_front_sector or is_virtual)
 
         if not active:
             return np.zeros(2, dtype=float), False
-
-        if predicted_risk_active:
-            predicted_separation_m = float(
-                obstacle.get("predicted_separation_m", safety_radius_m)
-            )
-            predicted_margin_m = max(
-                float(obstacle.get("collision_margin_m", safety_radius_m)),
-                1e-3,
-            )
-            proximity = max(
-                0.15,
-                float(
-                    np.clip(
-                        1.0
-                        - predicted_separation_m / predicted_margin_m,
-                        0.0,
-                        1.0,
-                    )
-                ),
-            )
-        elif inside_safety_boundary:
-            safety_intrusion = float(
-                np.clip(
-                    (safety_radius_m - centre_distance_m) / safety_radius_m,
-                    0.0,
-                    1.0,
-                )
-            )
-            proximity = 1.0 + 4.0 * safety_intrusion
-        else:
-            activation_width_m = max(
-                activation_radius_m - safety_radius_m,
-                1e-3,
-            )
-            proximity = float(
-                np.clip(
-                    (activation_radius_m - centre_distance_m)
-                    / activation_width_m,
-                    0.0,
-                    1.0,
-                )
-            )
 
         tcpa_s = np.nan
         dcpa_m = np.nan
@@ -2560,58 +2414,57 @@ class LaptopController:
         requested_side = 0.0
         rule = "none"
         risk = False
-        if not is_virtual and ENABLE_OBSTACLE_EKF_PREDICTION:
+        if not is_virtual and self.obstacle_ekf_prediction_enabled:
             tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
             encounter, requested_side, rule = self.apf_classify_encounter(obs_pos_body, obs_vel_body, own_vel_body)
-            encounter, requested_side, rule = (
-                self.stabilize_apf_overtaking_encounter(
-                    obstacle,
-                    encounter,
-                    requested_side,
-                    rule,
-                    authoritative=track_motion_stable,
-                )
+            current_risk_level, _ = self.apf_obstacle_level_and_away(
+                obstacle,
+                self.apf_risk_pc_scale,
+            )
+            relative_position_at_cpa = (
+                obs_pos_body
+                + (obs_vel_body - np.asarray(own_vel_body, dtype=float).reshape(2))
+                * max(float(tcpa_s), 0.0)
+            )
+            axis_body = self.earth_vector_to_body(
+                self.obstacle_length_axis_ne(obstacle)
+            )
+            cpa_risk_level, _ = self.apf_point_level_and_away(
+                -relative_position_at_cpa,
+                obstacle,
+                self.apf_risk_pc_scale,
+                axis_body,
             )
             risk = (
-                distance_m <= too_close_threshold_m
+                current_risk_level <= 1.0
                 or (
                     tcpa_s <= self.apf_collision_horizon_s
-                    and dcpa_m <= dcpa_threshold_m
+                    and cpa_risk_level <= 1.0
                 )
             )
             if encounter == "crossing_from_port" and not risk:
                 self.apf_encounter_mode = encounter
+                self.apf_colreg_rule = rule
                 self.apf_avoidance_side_sign = 0.0
                 self.apf_colreg_dcpa_m = dcpa_m
                 self.apf_colreg_tcpa_s = tcpa_s
                 self.apf_colreg_active = False
                 return np.zeros(2, dtype=float), False
         elif not is_virtual:
-            risk = distance_m <= too_close_threshold_m
+            risk = self.apf_obstacle_level_and_away(
+                obstacle,
+                self.apf_risk_pc_scale,
+            )[0] <= 1.0
 
-        goal_distance = max(float(np.linalg.norm(target_body)), 1e-3)
-        target_dir = np.asarray(target_body, dtype=float).reshape(2) / goal_distance
         repulsive_gain = self.apf_virtual_repulsive_gain if is_virtual else self.apf_repulsive_gain
-        peak_force = repulsive_gain * (
-            (goal_distance ** 2) * away_dir
-            + goal_distance * target_dir
-        )
-        force = proximity * peak_force
-        safety_barrier_gain = (
-            self.apf_goal_gain * self.apf_attraction_saturation_m
-        )
-        force += safety_barrier_gain * proximity * away_dir
+        proximity = self.apf_repulsive_weight(field_level)
+        force = repulsive_gain * proximity * away_dir
 
-        if (
-            is_virtual
-            or risk
-            or closing_speed > 0.0
-            or distance_m <= too_close_threshold_m
-        ):
+        if is_virtual or risk or closing_speed > 0.0:
             force += (
                 self.apf_dynamic_repulsive_gain
-                * proximity
                 * max(closing_speed, 0.0)
+                * proximity
                 * away_dir
             )
             if is_virtual:
@@ -2619,23 +2472,12 @@ class LaptopController:
                 dcpa_m = float(obstacle.get("dcpa_m", np.nan))
                 encounter = obstacle.get("encounter_mode", "dynamic_virtual_obstacle")
                 rule = obstacle.get("colreg_rule", "predicted collision point")
-                requested_side = float(
-                    obstacle.get("requested_side", 0.0)
-                )
-                encounter, requested_side, rule = (
-                    self.stabilize_apf_overtaking_encounter(
-                        obstacle,
-                        encounter,
-                        requested_side,
-                        rule,
-                        authoritative=True,
-                    )
-                )
                 if encounter == "crossing_from_port":
                     requested_side = -1.0
                     rule = "COLREG Rule 17: stand-on reactive avoidance, alter to starboard"
                     pass_astern_active = False
                 else:
+                    requested_side = float(obstacle.get("requested_side", 0.0))
                     pass_astern_active = (
                         encounter == "crossing_from_starboard"
                         and pass_astern_side != 0.0
@@ -2660,28 +2502,19 @@ class LaptopController:
                 if pass_astern_active:
                     requested_side = pass_astern_side
 
-            if risk and requested_side == 0.0:
+            if risk and requested_side == 0.0 and encounter == "static_obstacle":
                 requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
 
-            if requested_side == 0.0 and in_front_sector:
+            if (
+                requested_side == 0.0
+                and in_front_sector
+                and encounter == "static_obstacle"
+            ):
                 requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
-
-            if encounter == "head_on":
-                requested_side = -1.0
 
             side_sign = self.apf_lock_side(
-                requested_side if (risk or in_front_sector) else 0.0,
-                distance_m,
-                safety_radius_m,
-                self.apf_obstacle_side_lock_exit_margin_m(obstacle),
-                authoritative=(
-                    is_virtual
-                    or (
-                        track_motion_stable
-                        and encounter != "static_obstacle"
-                    )
-                ),
-                force_override=(encounter == "head_on"),
+                requested_side if (risk or direction_level <= 1.0) else 0.0,
+                direction_level,
             )
             if pass_astern_active:
                 obs_speed = float(np.linalg.norm(obs_vel_body))
@@ -2710,6 +2543,7 @@ class LaptopController:
 
             if risk:
                 self.apf_encounter_mode = encounter
+                self.apf_colreg_rule = rule
                 self.apf_avoidance_side_sign = side_sign
                 self.apf_colreg_dcpa_m = dcpa_m
                 self.apf_colreg_tcpa_s = tcpa_s
@@ -2720,143 +2554,35 @@ class LaptopController:
     def apf_avoidance_needed(self):
         front_is_blocked = self.front_blocked()
         virtual_obstacles = self.update_apf_virtual_obstacles()
-        own_vel_body = self.current_velocity_body()
-        self.update_apf_overtaking_state()
-        nearest_forward_clearance_m = np.inf
-        nearest_exit_margin_m = 0.0
+        nearest_forward_level = np.inf
         obstacle_needs_avoidance = False
 
         for obstacle in self.lidar_obstacles + virtual_obstacles:
-            if self.apf_overtaking_obstacle_ignored(obstacle):
-                continue
             obs_pos_body = np.asarray(obstacle.get("centre_body", [np.nan, np.nan]), dtype=float).reshape(2)
             if not np.isfinite(obs_pos_body).all():
                 continue
 
-            is_virtual = bool(obstacle.get("virtual", False))
-            centre_distance_m = float(np.linalg.norm(obs_pos_body))
             angle_rad = abs(wrap_angle(float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))))
-            if is_virtual or angle_rad <= self.apf_activation_front_half_angle_rad:
-                safety_radius_m = self.apf_obstacle_safety_radius_m(obstacle)
-                activation_radius_m = self.apf_obstacle_activation_radius_m(obstacle)
-                direction_decision_radius_m = max(
-                    activation_radius_m,
-                    self.apf_obstacle_direction_decision_radius_m(obstacle),
+            if (
+                bool(obstacle.get("virtual", False))
+                or angle_rad <= self.apf_activation_front_half_angle_rad
+            ):
+                field_level, _ = self.apf_obstacle_level_and_away(
+                    obstacle,
+                    self.apf_virtual_pc_scale
+                    if bool(obstacle.get("virtual", False))
+                    else self.apf_avoidance_pc_scale,
                 )
-                clearance_m = centre_distance_m - safety_radius_m
-                if clearance_m < nearest_forward_clearance_m:
-                    nearest_forward_clearance_m = clearance_m
-                    nearest_exit_margin_m = (
-                        self.apf_obstacle_side_lock_exit_margin_m(obstacle)
-                    )
-                if is_virtual or centre_distance_m < direction_decision_radius_m:
-                    (
-                        requested_side,
-                        encounter,
-                        _,
-                        tcpa_s,
-                        dcpa_m,
-                        authoritative,
-                    ) = self.apf_early_direction_for_obstacle(
-                        obstacle,
-                        own_vel_body,
-                    )
-                    if requested_side != 0.0:
-                        side_sign = self.apf_lock_side(
-                            -1.0 if encounter == "head_on" else requested_side,
-                            centre_distance_m,
-                            direction_decision_radius_m,
-                            self.apf_obstacle_side_lock_exit_margin_m(obstacle),
-                            authoritative=authoritative,
-                            force_override=(encounter == "head_on"),
-                        )
-                        self.apf_encounter_mode = encounter
-                        self.apf_avoidance_side_sign = side_sign
-                        self.apf_colreg_dcpa_m = dcpa_m
-                        self.apf_colreg_tcpa_s = tcpa_s
-                        self.apf_colreg_active = authoritative
+                nearest_forward_level = min(nearest_forward_level, field_level)
+                if field_level <= 1.0:
                     obstacle_needs_avoidance = True
-            elif centre_distance_m < self.apf_obstacle_safety_radius_m(obstacle):
-                obstacle_needs_avoidance = True
 
         if front_is_blocked or obstacle_needs_avoidance:
             return True
 
-        return self.refresh_apf_side_lock(
-            nearest_forward_clearance_m,
-            nearest_exit_margin_m,
-            release_when_clear=self.apf_obstacle_has_passed_and_is_separating(
-                virtual_obstacles,
-                own_vel_body,
-            ),
-        )
+        return self.refresh_apf_side_lock(nearest_forward_level)
 
-    def apf_obstacle_has_passed_and_is_separating(
-        self,
-        virtual_obstacles,
-        own_vel_body,
-    ):
-        """Allow a conservative early release of a stale avoidance-side lock."""
-        if virtual_obstacles or not ENABLE_OBSTACLE_EKF_PREDICTION:
-            return False
-
-        own_vel_body = np.asarray(own_vel_body, dtype=float).reshape(2)
-        if not np.isfinite(own_vel_body).all():
-            return False
-
-        for obstacle in self.lidar_obstacles:
-            obs_pos_body = np.asarray(
-                obstacle.get("centre_body", [np.nan, np.nan]),
-                dtype=float,
-            ).reshape(2)
-            if not np.isfinite(obs_pos_body).all():
-                continue
-
-            centre_distance_m = float(np.linalg.norm(obs_pos_body))
-            clear_distance_m = (
-                self.apf_obstacle_safety_radius_m(obstacle)
-                + self.apf_obstacle_side_lock_exit_margin_m(obstacle)
-            )
-            if (
-                obs_pos_body[0] >= -self.apf_own_equivalent_radius_m
-                or centre_distance_m <= clear_distance_m
-            ):
-                continue
-
-            track = self.apf_track_for_obstacle(obstacle)
-            if (
-                track is None
-                or not self.obstacle_track_motion_is_stable(track)
-            ):
-                continue
-
-            obstacle_velocity_ne = np.asarray(
-                track.get(
-                    "velocity_mean_ne",
-                    track.get("vel_ne", [np.nan, np.nan]),
-                ),
-                dtype=float,
-            ).reshape(2)
-            if not np.isfinite(obstacle_velocity_ne).all():
-                continue
-
-            relative_velocity_body = (
-                self.earth_vector_to_body(obstacle_velocity_ne)
-                - own_vel_body
-            )
-            separation_speed_m_s = float(
-                np.dot(obs_pos_body, relative_velocity_body)
-                / max(centre_distance_m, 1e-6)
-            )
-            if (
-                separation_speed_m_s
-                >= self.apf_side_lock_release_separation_speed_m_s
-            ):
-                return True
-
-        return False
-
-    def compute_apf_control(self):
+    def compute_apf_control(self, t, u_track):
         final_approach = self.final_approach_active()
         if final_approach:
             target_ne = self.goal_ne.copy()
@@ -2870,48 +2596,16 @@ class LaptopController:
         repulsive_force = np.zeros(2, dtype=float)
         own_vel_body = self.current_velocity_body()
         any_repulsion = False
+        clearance_offset_m = 0.0
         self.reset_apf_diagnostics()
-        if self.apf_overtaking_active:
-            self.apf_encounter_mode = "overtaking"
-            self.apf_avoidance_side_sign = self.apf_overtaking_side_sign
-            self.apf_colreg_active = True
         self.apf_target_ne = target_ne.copy()
+        self.apf_attractive_force_body = attractive_force
 
         virtual_obstacles = self.update_apf_virtual_obstacles()
-        obstacles = [
-            obstacle
-            for obstacle in self.lidar_obstacles + virtual_obstacles
-            if not self.apf_overtaking_obstacle_ignored(obstacle)
-        ]
+        obstacles = self.lidar_obstacles + virtual_obstacles
         priority_obstacles = []
         secondary_obstacles = []
-        active_obstacles = []
-        direction_obstacles = []
         for obstacle in obstacles:
-            obs_pos_body = np.asarray(
-                obstacle.get("centre_body", [np.nan, np.nan]),
-                dtype=float,
-            ).reshape(2)
-            if np.isfinite(obs_pos_body).all():
-                obstacle_angle = abs(
-                    wrap_angle(
-                        float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))
-                    )
-                )
-                if (
-                    (
-                        bool(obstacle.get("virtual", False))
-                        or obstacle_angle
-                        <= self.apf_activation_front_half_angle_rad
-                    )
-                    and (
-                        bool(obstacle.get("virtual", False))
-                        or float(np.linalg.norm(obs_pos_body))
-                        < self.apf_obstacle_direction_decision_radius_m(obstacle)
-                    )
-                ):
-                    direction_obstacles.append(obstacle)
-
             if self.apf_obstacle_in_priority_front_sector(obstacle):
                 priority_obstacles.append(obstacle)
             else:
@@ -2923,30 +2617,50 @@ class LaptopController:
             force_body += repulsion
             any_repulsion = any_repulsion or active
             if active:
-                active_obstacles.append(obstacle)
+                clearance_offset_m = max(
+                    clearance_offset_m,
+                    self.apf_direction_clearance_m(obstacle),
+                )
 
-        for obstacle in secondary_obstacles:
-            repulsion, active = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
-            repulsive_force += repulsion
-            force_body += repulsion
-            any_repulsion = any_repulsion or active
-            if active:
-                active_obstacles.append(obstacle)
+        if not any_repulsion:
+            for obstacle in secondary_obstacles:
+                repulsion, active = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
+                repulsive_force += repulsion
+                force_body += repulsion
+                any_repulsion = any_repulsion or active
+                if active:
+                    clearance_offset_m = max(
+                        clearance_offset_m,
+                        self.apf_direction_clearance_m(obstacle),
+                    )
 
-        corridor_obstacles = active_obstacles or direction_obstacles
-        if corridor_obstacles and self.apf_side_lock_sign != 0.0:
-            # Start steering toward the selected avoidance corridor as soon as
-            # the early direction-decision radius is entered.
-            safety_target_ne = self.apf_safety_corridor_target_ne(
-                target_ne,
-                corridor_obstacles,
-                self.apf_side_lock_sign,
+        if any_repulsion and self.apf_side_lock_sign != 0.0:
+            # side_sign uses the COLREG convention used throughout this
+            # controller: +1 is port/left and -1 is starboard/right.
+            route_normal_left_ne = np.array(
+                [self.route_path_unit_ne[1], -self.route_path_unit_ne[0]],
+                dtype=float,
             )
-            safety_target_body = self.earth_point_to_body(safety_target_ne)
-            attractive_force = self.apf_goal_attraction_body(safety_target_body)
-            force_body = repulsive_force + attractive_force
-            self.apf_target_ne = safety_target_ne.copy()
+            offset_target_ne = (
+                target_ne
+                + self.apf_side_lock_sign
+                * max(clearance_offset_m, self.obstacle_min_pc2_m)
+                * route_normal_left_ne
+            )
+            offset_target_body = self.earth_point_to_body(offset_target_ne)
+            offset_distance = float(np.linalg.norm(offset_target_body))
+            if offset_distance > 1e-6:
+                offset_force = (
+                    self.apf_clearance_gain
+                    * min(offset_distance, self.apf_attraction_saturation_m)
+                    * offset_target_body
+                    / offset_distance
+                )
+                force_body += offset_force
+                attractive_force += offset_force
+                self.apf_target_ne = offset_target_ne.copy()
 
+        self.apf_attractive_force_body = attractive_force
         force_norm = float(np.linalg.norm(force_body))
         if not np.isfinite(force_norm) or force_norm < 1e-6:
             force_body = np.array([1e-3, 0.0], dtype=float)
@@ -2978,81 +2692,18 @@ class LaptopController:
         force_angle = float(np.clip(force_angle, -self.apf_heading_step_limit_rad, self.apf_heading_step_limit_rad))
 
         u_cmd = Vector(2)
-        # APF avoidance is intentionally not constrained by the route-tracking
-        # speed, acceleration, yaw-rate, or yaw-acceleration limits.
-        u_cmd[1, 0] = (
-            -self.apf_heading_gain
-            * force_angle
-            / max(self.lastdt, 1e-3)
-        )
-        if self.apf_overtaking_active:
-            u_cmd[1, 0] = float(
-                np.clip(
-                    u_cmd[1, 0],
-                    -self.apf_overtaking_yaw_rate_limit_rad_s,
-                    self.apf_overtaking_yaw_rate_limit_rad_s,
-                )
+        u_cmd[1, 0] = np.clip(-self.apf_heading_gain * force_angle / max(self.lastdt, 1e-3), -self.w_max, self.w_max)
+
+        # Use constant-speed (fixed-step) descent during APF avoidance.  The
+        # gradient magnitude no longer changes surge speed; only its direction
+        # changes the commanded heading.
+        u_cmd[0, 0] = float(
+            np.clip(
+                self.apf_constant_descent_speed_m_s,
+                0.0,
+                self.v_max,
             )
-
-        surge_speed_m_s = self.apf_constant_descent_speed_m_s
-        if ENABLE_OBSTACLE_EKF_PREDICTION and self.apf_overtaking_active:
-            track = self.apf_track_by_id(self.apf_overtaking_track_id)
-            target_velocity_ne = None
-            if track is not None:
-                _, target_velocity_ne = self.obstacle_track_state_at(
-                    track, self.apf_prediction_dt_s
-                )
-            if target_velocity_ne is not None and np.isfinite(target_velocity_ne).all():
-                surge_speed_m_s = max(
-                    np.linalg.norm(target_velocity_ne) * self.apf_overtaking_speed_scale,
-                    self.apf_min_forward_speed,
-                )
-        if active_obstacles:
-            speed_scales = []
-            for obstacle in active_obstacles:
-                obs_pos_body = np.asarray(
-                    obstacle.get("centre_body", [np.nan, np.nan]),
-                    dtype=float,
-                ).reshape(2)
-                if not np.isfinite(obs_pos_body).all():
-                    continue
-
-                centre_distance_m = float(np.linalg.norm(obs_pos_body))
-                safety_radius_m = self.apf_obstacle_safety_radius_m(obstacle)
-                activation_radius_m = self.apf_obstacle_activation_radius_m(obstacle)
-
-                if centre_distance_m < safety_radius_m:
-                    distance_ratio = centre_distance_m / safety_radius_m
-                    speed_scale = max(
-                        self.apf_min_forward_speed
-                        / max(self.apf_constant_descent_speed_m_s, 1e-3),
-                        0.5 * distance_ratio ** 2,
-                    )
-                else:
-                    speed_scale = 0.5 + 0.5 * np.clip(
-                        (centre_distance_m - safety_radius_m)
-                        / max(activation_radius_m - safety_radius_m, 1e-3),
-                        0.0,
-                        1.0,
-                    )
-                    if (
-                        self.apf_overtaking_active
-                        and (
-                            self.apf_overtaking_track_id is None
-                            or self.apf_obstacle_track_id(obstacle)
-                            == self.apf_overtaking_track_id
-                        )
-                    ):
-                        speed_scale = max(
-                            speed_scale,
-                            self.apf_overtaking_min_speed_scale,
-                        )
-                speed_scales.append(float(speed_scale))
-
-            if speed_scales:
-                surge_speed_m_s *= min(speed_scales)
-
-        u_cmd[0, 0] = float(max(surge_speed_m_s, 0.0))
+        )
 
         if any_repulsion or self.apf_colreg_active or self.apf_side_lock_active:
             if self.apf_colreg_active:
@@ -3064,44 +2715,7 @@ class LaptopController:
 
         return u_cmd
 
-    def compute_path_recovery_control(self):
-        current_ne = np.array([float(self.North), float(self.East)], dtype=float)
-        _, recovery_target_ne = self.route_progress_and_point(
-            self.recovery_lookahead_m
-        )
-        to_target_ne = recovery_target_ne - current_ne
-
-        if float(np.linalg.norm(to_target_ne)) > 1e-6:
-            target_heading_rad = float(
-                np.arctan2(to_target_ne[1], to_target_ne[0])
-            )
-        else:
-            target_heading_rad = self.route_heading_rad
-
-        intercept_angle_rad = float(
-            np.clip(
-                wrap_angle(target_heading_rad - self.route_heading_rad),
-                -self.recovery_max_intercept_angle_rad,
-                self.recovery_max_intercept_angle_rad,
-            )
-        )
-        desired_heading_rad = wrap_angle(
-            self.route_heading_rad + intercept_angle_rad
-        )
-        heading_error_rad = wrap_angle(
-            float(self.Yaw) - desired_heading_rad
-        )
-        speed_scale = max(
-            float(np.cos(heading_error_rad)),
-            self.recovery_min_speed_scale,
-        )
-
-        u_recover = Vector(2)
-        u_recover[0, 0] = self.route_tracking_speed_m_s * speed_scale
-        u_recover[1, 0] = self.recovery_heading_gain * heading_error_rad
-        return u_recover
-
-    def compute_route_tracking_control(self):
+    def compute_route_tracking_control(self, t):
         current_ne = np.array([self.North, self.East], dtype=float)
         final_distance = float(np.linalg.norm(self.goal_ne - current_ne))
 
@@ -3120,10 +2734,18 @@ class LaptopController:
             else:
                 heading_speed_scale = max(float(np.cos(heading_error)), 0.15)
 
+            p_ref = Vector(3)
+            p_ref[0, 0] = ref_ne[0]
+            p_ref[1, 0] = ref_ne[1]
+            p_ref[2, 0] = desired_heading
+
+            u_ref = Vector(2)
+            u_ref[0, 0] = self.route_tracking_speed_m_s * speed_fraction
+
             u_track = Vector(2)
             u_track[0, 0] = self.route_tracking_speed_m_s * speed_fraction * heading_speed_scale
             u_track[1, 0] = 1.4 * heading_error
-            return u_track
+            return p_ref, u_ref, u_track
 
         # Track the straight start-goal line by projecting the current position onto
         # the route and aiming at a short look-ahead point on that same line.
@@ -3134,10 +2756,18 @@ class LaptopController:
         error_body = self.earth_vector_to_body(ref_ne - current_ne)
         heading_error = wrap_angle(float(self.Yaw) - self.route_heading_rad)
 
+        p_ref = Vector(3)
+        p_ref[0, 0] = ref_ne[0]
+        p_ref[1, 0] = ref_ne[1]
+        p_ref[2, 0] = self.route_heading_rad
+
+        u_ref = Vector(2)
+        u_ref[0, 0] = self.route_tracking_speed_m_s
+
         u_track = Vector(2)
         u_track[0, 0] = self.route_tracking_speed_m_s
         u_track[1, 0] = -0.8 * error_body[1] + 1.2 * heading_error
-        return u_track
+        return p_ref, u_ref, u_track
 
     def groundtruth_callback(self, msg):
         # generate fake aruco data at a set interval
@@ -3171,6 +2801,21 @@ class LaptopController:
         with self.groundtruth_log.open('a') as f:
             f.write(f"{t},{t-self.starttime},{n},{e},{d},{roll},{pitch},{yaw},{broadcast}\n")
          
+    def feedback_control(self, ds, ks = None, kn = None, kg = None):
+
+        if ks == None: ks = 0.1
+        if kn == None: kn = 0.1
+        if kg == None: kg = 0.1        
+        
+        dv = ks*ds[0]
+        dw = kn*ds[1]+kg*ds[2]
+        
+        du = Vector(2)
+        
+        du[0] = dv
+        du[1] = dw
+        
+        return du
     def motion_model(self, state, control_input, dt):
        """
        EKF motion model:
@@ -3182,10 +2827,12 @@ class LaptopController:
            F               (6x6 Jacobian)
        """
 
-       yaw = float(state[G, 0])
-       c, s = np.cos(yaw), np.sin(yaw)
-       rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-       Fe = rotation @ self.G @ control_input
+       # Thruster forces in body frame from allocation matrix
+       Fb = self.G @ control_input  # [Fx, Fy, tau_z]^T in body frame
+
+       # Convert thrust from body to earth frame
+       H_eb = HomogeneousTransformation(state[N:E+1], state[G])
+       Fe = H_eb.H_R @ Fb  # [Fx_e, Fy_e, tau_z_e]^T
 
        # Dynamics in earth frame
        ve = self.robot.model(
@@ -3196,26 +2843,29 @@ class LaptopController:
            dt,
        )  # ve = [Ndot, Edot, Gdot]^T
 
-       vb = rotation.T @ ve
-       v, w = float(vb[0, 0]), float(vb[2, 0])
-       next_yaw = yaw + w * dt
-       if abs(w) < 1e-3:
-           delta_ne = v * dt * np.array([c, s])
-       else:
-           delta_ne = (v / w) * np.array([
-               np.sin(next_yaw) - np.sin(yaw),
-               np.cos(yaw) - np.cos(next_yaw),
-           ])
+       # Body-frame velocity
+       vb = Inverse(H_eb.H_R) @ ve
 
-       predicted_state = state.copy()
-       predicted_state[N:E + 1, 0] += delta_ne
-       predicted_state[G, 0] = next_yaw % (2 * np.pi)
+       # Twist used for kinematics
+       u = Vector(2)
+       u[0, 0] = vb[0, 0]  # surge speed v
+       u[1, 0] = vb[2, 0]  # yaw rate w
+
+       # Pose update
+       p = rigid_body_kinematics(state[N:G+1], u, dt)
+       p[2, 0] = p[2, 0] % (2 * np.pi)
+
+       # Build predicted state vector
+       predicted_state = Vector(6)
+       predicted_state[N]    = p[0]
+       predicted_state[E]    = p[1]
+       predicted_state[G]    = p[2]
        predicted_state[DOTN] = ve[0]
        predicted_state[DOTE] = ve[1]
        predicted_state[DOTG] = ve[2]
 
        # Simple Jacobian: integrate velocity (good enough for EKF here)
-       F = np.eye(6)
+       F = Identity(6)
        F[N, DOTN]   = dt
        F[E, DOTE]   = dt
        F[G, DOTG]   = dt
@@ -3235,57 +2885,13 @@ class LaptopController:
 
         return reverse_force, forward_force
 
-    def allocate_propulsion_rates(self, v_cmd, w_cmd, enforce_motion_limits=True):
+    def allocate_propulsion_rates(self, v_cmd, w_cmd):
         v_cmd = float(v_cmd) if np.isfinite(v_cmd) else 0.0
         w_cmd = float(w_cmd) if np.isfinite(w_cmd) else 0.0
         v_cmd = max(v_cmd, 0.0)
 
-        if enforce_motion_limits:
-            v_cmd = float(np.clip(v_cmd, 0.0, self.v_max))
-            w_cmd = float(np.clip(w_cmd, -self.w_max, self.w_max))
-
-            current_velocity_body = self.current_velocity_body()
-            current_v = (
-                float(current_velocity_body[0])
-                if np.isfinite(current_velocity_body[0])
-                else 0.0
-            )
-            current_w = float(self.v_robot[2, 0])
-            if not np.isfinite(current_w):
-                current_w = 0.0
-
-            dt = max(float(self.lastdt), 1e-3)
-            desired_linear_acceleration = (v_cmd - current_v) / dt
-            desired_linear_acceleration = float(
-                np.clip(
-                    desired_linear_acceleration,
-                    -self.linear_deceleration_limit_m_s2,
-                    self.linear_acceleration_limit_m_s2,
-                )
-            )
-            desired_angular_acceleration = float(
-                np.clip(
-                    (w_cmd - current_w) / dt,
-                    -self.angular_acceleration_limit_rad_s2,
-                    self.angular_acceleration_limit_rad_s2,
-                )
-            )
-
-            # Feed forward measured drag and apply the configured acceleration
-            # limits during normal route tracking.
-            desired_force_x = (
-                self.robot.k_drag * current_v * abs(current_v)
-                + self.robot.m_tot * desired_linear_acceleration
-            )
-            desired_tau_z = (
-                self.robot.B_66 * current_w
-                + self.robot.I_tot * desired_angular_acceleration
-            )
-        else:
-            # During avoidance, map the raw APF command directly to steady-state
-            # force and moment. Only actuator capability is allowed to saturate it.
-            desired_force_x = self.robot.k_drag * v_cmd * abs(v_cmd)
-            desired_tau_z = self.robot.B_66 * w_cmd
+        desired_force_x = self.robot.k_drag * v_cmd * abs(v_cmd)
+        desired_tau_z = self.robot.B_66 * w_cmd
         reverse_force, forward_force = self.thruster_force_limits()
 
         yaw_arm = 0.5 * (float(self.G[2, 0]) - float(self.G[2, 1]))
@@ -3301,6 +2907,7 @@ class LaptopController:
             delta = float(np.clip(desired_delta, -max_delta, max_delta))
 
             force_lower = max(
+                0.0,
                 2.0 * reverse_force - delta,
                 2.0 * reverse_force + delta,
             )
@@ -3310,13 +2917,7 @@ class LaptopController:
             )
 
             if force_upper < force_lower:
-                force_x = float(
-                    np.clip(
-                        desired_force_x,
-                        2.0 * reverse_force,
-                        2.0 * forward_force,
-                    )
-                )
+                force_x = max(0.0, min(desired_force_x, 2.0 * forward_force))
             else:
                 force_x = float(np.clip(desired_force_x, force_lower, force_upper))
 
@@ -3332,6 +2933,10 @@ class LaptopController:
         left_rate = float(np.clip(rpm_L * (2.0 * np.pi / 60.0), -self.prop_rate_limit_rad_s, self.prop_rate_limit_rad_s))
         return right_rate, left_rate
 
+    def empty_measurement(x):
+        H = Matrix(5)
+        return x, H
+    
     ######## MAIN ROBOT LOOP ##################
     def loop(self):
         """This main loop is completed every 0.2 seconds.        
@@ -3355,6 +2960,11 @@ class LaptopController:
             self.sensed_pos_northings_m = sensed_pos[1]
             self.sensed_pos_eastings_m = sensed_pos[2]
             self.sensed_pos_yaw_rad = sensed_pos[6]
+            print(
+                "Received position update from",
+                current_epoch_s - self.sensed_pos_stamp_s,
+                "seconds ago",
+            )
 
         if self.initialise_pose and self.sensed_pos_northings_m is not None:
             self.mu[N] = self.sensed_pos_northings_m
@@ -3372,6 +2982,7 @@ class LaptopController:
             self.v_robot[2] = self.mu[DOTG]
             self.integrated_yaw = self.sensed_pos_yaw_rad
             self.initialise_pose = False
+            print("Initialised pose")
 
         imu_fresh = (
             self.sensed_imu_stamp_s is not None
@@ -3386,9 +2997,26 @@ class LaptopController:
             else:
                 dt_imu = self.lastdt
 
+            print(
+                "Received IMU update from",
+                current_epoch_s - self.sensed_imu_stamp_s,
+                "seconds ago",
+            )
+
             self.sensed_imu_prev_stamp_s = self.sensed_imu_stamp_s
-            self.integrated_yaw += self.sensed_imu_yaw_rate_rad_s * dt_imu
+            self.sensed_yaw_rate = self.sensed_imu_yaw_rate_rad_s
+            self.integrated_yaw += self.sensed_yaw_rate * dt_imu
             self.integrated_yaw %= 2 * np.pi
+
+        if (
+            self.sensed_bottom_depth_stamp_s is not None
+            and current_epoch_s - self.sensed_bottom_depth_stamp_s < self.lastdt
+        ):
+            print(
+                "Received Echosounder update from",
+                current_epoch_s - self.sensed_bottom_depth_stamp_s,
+                "seconds ago",
+            )
 
         if self.sensed_imu_stamp_s is not None or self.OPERATING_MODE == 2:
             ### EKF PREDICT/UPDATE ##############################
@@ -3405,27 +3033,29 @@ class LaptopController:
             )
 
             if self.sensed_pos_stamp_s is not None:
-                z_pose = np.array([
-                    self.sensed_pos_northings_m,
-                    self.sensed_pos_eastings_m,
-                    self.sensed_pos_yaw_rad,
-                ], dtype=float).reshape(3, 1)
+                z_pose = Vector(6)
+                z_pose[N] = self.sensed_pos_northings_m
+                z_pose[E] = self.sensed_pos_eastings_m
+                z_pose[G] = self.sensed_pos_yaw_rad
 
                 self.mu, self.Sigma = extended_kalman_filter_update(
                     self.mu,
                     self.Sigma,
                     z_pose,
-                    (N, E, G),
+                    h_pose_update,
                     self.R_pose,
-                    wrap_index=2,
+                    wrap_index=G,   
                 )
 
-            if imu_fresh and self.sensed_imu_yaw_rate_rad_s is not None:
+            if imu_fresh and self.sensed_yaw_rate is not None:
+                z_rate = Vector(6)
+                z_rate[DOTG] = self.sensed_yaw_rate
+
                 self.mu, self.Sigma = extended_kalman_filter_update(
                     self.mu,
                     self.Sigma,
-                    np.array([[self.sensed_imu_yaw_rate_rad_s]], dtype=float),
-                    (DOTG,),
+                    z_rate,
+                    h_grate_update,
                     self.R_grate,
                 )
 
@@ -3440,54 +3070,45 @@ class LaptopController:
             self.East = self.p_robot[1][0]
 
             ### ROUTE TRACKING + MODIFIED APF CONTROL #######
-            u_track = self.compute_route_tracking_control()
+            t = self.timefromstart
+            _, _, u_track = self.compute_route_tracking_control(t)
             final_distance = self.goal_distance_m()
             final_approach = self.final_approach_active(final_distance)
 
             if final_distance <= self.goal_tolerance_m:
                 self.goal_reached = True
+                if np.isnan(self.s.t_complete):
+                    self.s.t_complete = self.timefromstart
 
             if self.goal_reached:
                 self.u = Vector(2)
                 self.navigation_mode = "arrived"
-                self.path_recovery_active = False
                 self.reset_apf_diagnostics()
             elif self.apf_avoidance_needed():
-                self.path_recovery_active = False
-                self.u = self.compute_apf_control()
-            elif self.update_path_recovery_state(final_approach):
-                self.u = self.compute_path_recovery_control()
-                self.navigation_mode = "recover"
-                self.reset_apf_diagnostics(
-                    clear_visual=not self.apf_visual_hold_active()
-                )
+                self.u = self.compute_apf_control(t, u_track)
             else:
                 self.u = u_track
                 self.navigation_mode = "track"
                 self.reset_apf_diagnostics(clear_visual=not self.apf_visual_hold_active())
 
-            avoidance_active = self.navigation_mode.startswith("apf_")
             if self.goal_reached:
                 self.u[0, 0] = 0.0
                 self.u[1, 0] = 0.0
             else:
-                if not avoidance_active and not final_approach:
+                if not final_approach:
                     self.u[1, 0] = self.limit_heading_deviation_command(self.u[1, 0])
-                if not avoidance_active:
-                    self.u[1, 0] = np.clip(self.u[1, 0], -self.w_max, self.w_max)
-                    self.u[0, 0] = np.clip(self.u[0, 0], 0.0, self.v_max)
+                self.u[1, 0] = np.clip(self.u[1, 0], -self.w_max, self.w_max)
+                self.u[0, 0] = np.clip(self.u[0, 0], 0.0, self.v_max)
+            self.prev_sensed = t
+            self.U = self.u.T
 
-            v = float(self.u[0, 0])
-            w = float(self.u[1, 0])
+            v = float(self.U[0][0])
+            w = float(self.U[0][1])
             if self.goal_reached:
                 self.right_rate = 0.0
                 self.left_rate = 0.0
             else:
-                self.right_rate, self.left_rate = self.allocate_propulsion_rates(
-                    v,
-                    w,
-                    enforce_motion_limits=not avoidance_active,
-                )
+                self.right_rate, self.left_rate = self.allocate_propulsion_rates(v, w)
 
             control_msg = Vector3()
             control_msg.x = int(self.right_rate)
@@ -3495,6 +3116,17 @@ class LaptopController:
             control_msg.z = float(self.route_tracking_speed_m_s)
 
             self.control_pub.publish(control_msg)
+            print(
+                'Navigation mode:', self.navigation_mode,
+                'encounter:', self.apf_encounter_mode,
+                'side=', int(self.apf_avoidance_side_sign),
+                'DCPA=', round(float(self.apf_colreg_dcpa_m), 2) if np.isfinite(self.apf_colreg_dcpa_m) else 'nan',
+                'TCPA=', round(float(self.apf_colreg_tcpa_s), 2) if np.isfinite(self.apf_colreg_tcpa_s) else 'nan',
+                'v=', round(float(v), 3),
+                'w=', round(float(w), 3),
+                'F_body=', np.round(self.apf_force_body, 3),
+            )
+            print('Prop rates: R=',self.right_rate,', L=',self.left_rate,'rad/s')
             
         nearest_obstacle_north = np.nan
         nearest_obstacle_east = np.nan
@@ -3515,12 +3147,14 @@ class LaptopController:
 
         ### LOG DATA ##############################
         with self.filename.open("a") as f:
-            f.write(f"{current_epoch_s},{self.timefromstart},{self.right_rate},{self.left_rate},{self.lastdt},{self.Yaw},{self.North},{self.East},{self.sensed_imu_yaw_rate_rad_s},{self.integrated_yaw},{self.sensed_imu_stamp_s},{self.sensed_pos_northings_m},{self.sensed_pos_eastings_m},{self.sensed_pos_yaw_rad}, {self.sensed_pos_stamp_s}, {self.sensed_bottom_depth_stamp_s},{self.sensed_bottom_depth_m},{self.navigation_mode},{self.apf_encounter_mode},{self.apf_avoidance_side_sign},{self.apf_colreg_dcpa_m},{self.apf_colreg_tcpa_s},{self.apf_force_body[0]},{self.apf_force_body[1]},{nearest_obstacle_north},{nearest_obstacle_east},{nearest_obstacle_distance}\n")
+            f.write(f"{current_epoch_s},{self.timefromstart},{self.right_rate},{self.left_rate},{self.lastdt},{self.Yaw},{self.North},{self.East},{self.sensed_yaw_rate},{self.integrated_yaw},{self.sensed_imu_stamp_s},{self.sensed_pos_northings_m},{self.sensed_pos_eastings_m},{self.sensed_pos_yaw_rad}, {self.sensed_pos_stamp_s}, {self.sensed_bottom_depth_stamp_s},{self.sensed_bottom_depth_m},{self.navigation_mode},{self.apf_encounter_mode},{self.apf_avoidance_side_sign},{self.apf_colreg_dcpa_m},{self.apf_colreg_tcpa_s},{self.apf_force_body[0]},{self.apf_force_body[1]},{nearest_obstacle_north},{nearest_obstacle_east},{nearest_obstacle_distance}\n")
         self.write_obstacle_snapshot()
         
         ### VISUALISE DATA ##############################
         if self.OPERATING_MODE != 0:
-            return(self.right_rate, self.left_rate, self.lastdt, self.Yaw, self.North, self.East, self.integrated_yaw, self.sensed_imu_stamp_s, self.sensed_pos_northings_m, self.sensed_pos_eastings_m, self.sensed_pos_yaw_rad, self.sensed_pos_stamp_s, self.sensed_bottom_depth_m, self.sensed_bottom_depth_stamp_s, self.lidar_data)
+            reference_path = getattr(self.s, "P_arc", getattr(self.s, "P", None))
+            mission_complete = not np.isnan(getattr(self.s, "t_complete", np.nan))
+            return(self.right_rate, self.left_rate, self.lastdt, self.Yaw, self.North, self.East, self.sensed_yaw_rate,self.integrated_yaw, self.sensed_imu_stamp_s, self.sensed_pos_northings_m, self.sensed_pos_eastings_m, self.sensed_pos_yaw_rad, self.sensed_pos_stamp_s, self.waypoints, reference_path, self.sensed_bottom_depth_m, self.sensed_bottom_depth_stamp_s, mission_complete, self.lidar_data)
 
 
 

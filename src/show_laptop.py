@@ -66,9 +66,9 @@ class ShowLaptop(QWidget):
         obstacleEkfPositionPlot = LiveScatterPlot(symbol = 'o', size = 8, pen = 'orange', name = 'Obstacle EKF Position')
         obstacleVirtualPositionPlot = LiveScatterPlot(symbol = 'x', size = 12, pen = 'magenta', name = 'Obstacle Predicted Position')
         virtualCollisionPositionPlot = LiveScatterPlot(symbol = 'd', size = 14, pen = 'yellow', name = 'Virtual Collision Position')
-        obstacleEkfHistoryPlot = LiveLinePlot(pen = 'green', name = 'Obstacle EKF Track')
-        obstacleEkfPredictionPlot = LiveLinePlot(pen = 'orange', name = 'Obstacle EKF Prediction')
-        obstacleEkfDirectionPlot = LiveLinePlot(pen = 'red', name = 'Obstacle Direction')
+        obstacleEkfHistoryPlot = LiveLinePlot(pen = 'green', name = 'LiDAR Cluster Centre Track (e-frame)')
+        obstacleEkfPredictionPlot = LiveLinePlot(pen = 'orange', name = 'Obstacle EKF Prediction (e-frame)')
+        obstacleEkfDirectionPlot = LiveLinePlot(pen = 'red', name = 'Obstacle Velocity (e-frame)')
         
         dtplot = LiveLinePlot(pen='blue', name = 'Laptop Update')
         Idtplot = LiveScatterPlot(symbol = 'x', pen = 'red', name = 'IMU Update')
@@ -265,16 +265,26 @@ class ShowLaptop(QWidget):
             if np.isfinite(virtual_position_ne).all():
                 virtual_northings.append(virtual_position_ne[0])
                 virtual_eastings.append(virtual_position_ne[1])
-            self._append_track_segments(history_northings, history_eastings, track.get("history_ne", []))
+            self._append_track_segments(
+                history_northings,
+                history_eastings,
+                track.get("lidar_history_ne", []),
+            )
             self._append_track_segments(prediction_northings, prediction_eastings, track.get("prediction_ne", []))
 
             heading_deg = float(track.get("heading_deg", np.nan))
-            if np.isfinite(heading_deg):
-                summaries.append(f"#{track_id} {heading_deg:.0f}deg")
-
             speed_m_s = float(track.get("speed_m_s", np.linalg.norm(velocity_ne)))
+            pc1_m = float(track.get("pc1_m", np.nan))
+            pc2_m = float(track.get("pc2_m", np.nan))
+            if np.isfinite(heading_deg):
+                summaries.append(
+                    f"#{track_id} {heading_deg:.0f}deg {speed_m_s:.2f}m/s "
+                    f"pc1={pc1_m:.2f} pc2={pc2_m:.2f}"
+                )
+
             if np.isfinite(speed_m_s) and speed_m_s >= 1e-3 and np.isfinite(velocity_ne).all():
-                vector_len_m = 0.45
+                # velocity_ne is already in the e-frame; vector length encodes speed.
+                vector_len_m = float(np.clip(2.0 * speed_m_s, 0.15, 1.0))
                 direction_ne = velocity_ne / max(float(np.linalg.norm(velocity_ne)), 1e-6)
                 end_ne = position_ne + direction_ne * vector_len_m
                 direction_northings.extend([position_ne[0], end_ne[0], np.nan])
@@ -338,8 +348,28 @@ class ShowLaptop(QWidget):
     def update(self):
         """Run control and visualization updates at the configured rate."""
         while self.running:
-                    
-            right_rate, left_rate, lastdt, current_heading, North, East, sensed_yaw, imu_time1, sensed_pos_northings_m, sensed_pos_eastings_m, sensed_pos_yaw_rad, ARUCO_time1, depth, depth_time1, lidar_cloud_ne = self.Laptop.loop()
+
+            (
+                right_rate,
+                left_rate,
+                lastdt,
+                current_heading,
+                North,
+                East,
+                _sensed_yaw_rate,
+                sensed_yaw,
+                imu_time1,
+                sensed_pos_northings_m,
+                sensed_pos_eastings_m,
+                sensed_pos_yaw_rad,
+                ARUCO_time1,
+                _waypoints,
+                _reference_path,
+                depth,
+                depth_time1,
+                _mission_complete,
+                lidar_cloud_ne,
+            ) = self.Laptop.loop()
             if self.loopcounter == 0:
                 for waypoint in self.Laptop.waypoints:
                     self.WP.cb_append_data_point(waypoint.y, waypoint.x)
