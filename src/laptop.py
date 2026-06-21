@@ -314,6 +314,11 @@ class LaptopController:
         self.lidar_data_rb = None
         self.lidar_timestamp_s = None
         self.latest_lidar_received_s = None
+        self.lidar_beam_stamps_s = None
+        self.lidar_scan_time_s = 0.0
+        self.lidar_reference_pose = None
+        self.lidar_pose_extrapolation_limit_s = 0.5
+        self.lidar_time_sync_std_s = 0.02
         self.lidar_new = False
         self.lidar_x_bl = 0.1
         self.lidar_y_bl = 0.0
@@ -324,6 +329,7 @@ class LaptopController:
         self.lidar_dbscan_eps_m = 0.20
         self.lidar_dbscan_min_points = 3
         self.lidar_points_body = np.empty((0, 2))
+        self.lidar_points_ne = np.empty((0, 2))
         self.lidar_cluster_labels = np.array([], dtype=int)
         self.lidar_obstacles = []
         self.lidar_obstacle_centres_body = np.empty((0, 2))
@@ -418,7 +424,8 @@ class LaptopController:
         self.obstacle_ekf_accel_std_m_s2 = 0.20 if self.OPERATING_MODE == 2 else 0.35
         self.obstacle_ekf_initial_position_std_m = 0.20
         self.obstacle_ekf_initial_velocity_std_m_s = 0.35
-        self.obstacle_prediction_horizon_s = 5.0 if self.OPERATING_MODE == 2 else 4.0
+        self.obstacle_heading_hold_speed_m_s = 0.03
+        self.obstacle_prediction_horizon_s = 15.0
         self.obstacle_prediction_step_s = 0.5
         self.obstacle_history_len = 60
         self.obstacle_stats_window_s = 2.5
@@ -693,32 +700,46 @@ class LaptopController:
         ranges = np.where((ranges > 0.0) & np.isfinite(ranges), ranges, np.nan)
         self.lidar_data_rb = np.column_stack([ranges, angles])
 
-        pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
-        p_eb = Vector(3)
-        p_eb[0] = pose[0]
-        p_eb[1] = pose[1]
-        p_eb[2] = pose[2]
+        time_increment_s = float(getattr(msg, "time_increment", 0.0) or 0.0)
+        scan_time_s = float(getattr(msg, "scan_time", 0.0) or 0.0)
+        if not np.isfinite(time_increment_s) or time_increment_s < 0.0:
+            time_increment_s = 0.0
+        if not np.isfinite(scan_time_s) or scan_time_s < 0.0:
+            scan_time_s = 0.0
+        if time_increment_s <= 0.0 and len(ranges) > 1 and scan_time_s > 0.0:
+            time_increment_s = scan_time_s / (len(ranges) - 1)
+        self.lidar_scan_time_s = max(
+            scan_time_s,
+            time_increment_s * max(len(ranges) - 1, 0),
+        )
+        self.lidar_beam_stamps_s = (
+            self.lidar_timestamp_s
+            + time_increment_s * np.arange(len(ranges), dtype=float)
+        )
 
-        self.lidar_data = np.full((len(ranges), 2), np.nan)
-        z_lm = Vector(2)
-
-        for i, range_m in enumerate(ranges):
-            if np.isfinite(range_m):
-                z_lm[0] = range_m
-                z_lm[1] = angles[i]
-                t_em = self.lidar.rangeangle_to_loc(p_eb, z_lm)
-
-                self.lidar_data[i, 0] = t_em[0]
-                self.lidar_data[i, 1] = t_em[1]
-
-        self.lidar_data = self.lidar_data[~np.isnan(self.lidar_data).any(axis=1)]
         self.update_lidar_obstacle_clusters()
+        self.lidar_data = self.lidar_points_ne.copy()
         self.update_apf_obstacle_tracks(self.lidar_timestamp_s)
         self.update_lidar_sectors()
         self.lidar_new = True
         self.robot_available = True
 
     # ---------------- LiDAR coordinate transforms ----------------
+    def robot_pose_at_time(self, stamp_s):
+        # ponytail: constant-velocity deskew; add a pose-history interpolator
+        # only if LiDAR latency exceeds this short extrapolation window.
+        pose = np.asarray(self.p_robot, dtype=float).reshape(3).copy()
+        velocity = np.asarray(
+            getattr(self, "v_robot", np.zeros((3, 1))),
+            dtype=float,
+        ).reshape(3)
+        state_stamp_s = float(getattr(self, "last_nav_t", stamp_s))
+        max_dt_s = max(float(getattr(self, "lidar_pose_extrapolation_limit_s", 0.5)), 0.0)
+        dt_s = float(np.clip(float(stamp_s) - state_stamp_s, -max_dt_s, max_dt_s))
+        pose[0:2] += velocity[0:2] * dt_s
+        pose[2] = wrap_angle(pose[2] + velocity[2] * dt_s)
+        return pose
+
     def earth_vector_to_body(self, vector_ne):
         # Body frame convention: x is forward, y is left, gamma is yaw in earth frame.
         pose = np.asarray(self.p_robot, dtype=float).reshape(-1)
@@ -764,6 +785,7 @@ class LaptopController:
     # ---------------- LiDAR DBSCAN clustering ----------------
     def clear_lidar_obstacle_clusters(self):
         self.lidar_points_body = np.empty((0, 2))
+        self.lidar_points_ne = np.empty((0, 2))
         self.lidar_cluster_labels = np.array([], dtype=int)
         self.lidar_obstacles = []
         self.lidar_obstacle_centres_body = np.empty((0, 2))
@@ -788,9 +810,47 @@ class LaptopController:
         valid_ranges = ranges[valid]
         valid_angles = angles[valid] + self.lidar_gamma_bl
 
-        self.lidar_points_body = np.column_stack([
+        points_body_at_beam = np.column_stack([
             self.lidar_x_bl + valid_ranges * np.cos(valid_angles),
             self.lidar_y_bl + valid_ranges * np.sin(valid_angles),
+        ])
+
+        beam_stamps_s = getattr(self, "lidar_beam_stamps_s", None)
+        if beam_stamps_s is None or len(beam_stamps_s) != len(ranges):
+            lidar_timestamp_s = getattr(self, "lidar_timestamp_s", None)
+            reference_stamp_s = float(
+                lidar_timestamp_s
+                if lidar_timestamp_s is not None
+                else getattr(self, "last_nav_t", time.time())
+            )
+            valid_stamps_s = np.full(len(valid_ranges), reference_stamp_s, dtype=float)
+        else:
+            valid_stamps_s = np.asarray(beam_stamps_s, dtype=float)[valid]
+            reference_stamp_s = float(valid_stamps_s[0])
+
+        reference_pose = self.robot_pose_at_time(reference_stamp_s)
+        self.lidar_reference_pose = reference_pose.copy()
+        beam_poses = np.asarray(
+            [self.robot_pose_at_time(stamp_s) for stamp_s in valid_stamps_s],
+            dtype=float,
+        )
+        beam_cos = np.cos(beam_poses[:, 2])
+        beam_sin = np.sin(beam_poses[:, 2])
+        self.lidar_points_ne = np.column_stack([
+            beam_poses[:, 0]
+            + beam_cos * points_body_at_beam[:, 0]
+            - beam_sin * points_body_at_beam[:, 1],
+            beam_poses[:, 1]
+            + beam_sin * points_body_at_beam[:, 0]
+            + beam_cos * points_body_at_beam[:, 1],
+        ])
+
+        reference_cos = np.cos(reference_pose[2])
+        reference_sin = np.sin(reference_pose[2])
+        relative_ne = self.lidar_points_ne - reference_pose[0:2]
+        self.lidar_points_body = np.column_stack([
+            reference_cos * relative_ne[:, 0] + reference_sin * relative_ne[:, 1],
+            -reference_sin * relative_ne[:, 0] + reference_cos * relative_ne[:, 1],
         ])
 
         labels = DBSCAN(
@@ -806,6 +866,7 @@ class LaptopController:
                 continue
 
             cluster_points = self.lidar_points_body[labels == label]
+            cluster_points_ne = self.lidar_points_ne[labels == label]
             centre_body, pc1_m, pc2_m, length_axis_body = cluster_principal_dimensions(
                 cluster_points,
                 self.obstacle_min_pc1_m,
@@ -816,11 +877,20 @@ class LaptopController:
             cluster_extent_xy_m = np.ptp(cluster_points, axis=0)
             cluster_size_m = float(np.linalg.norm(cluster_extent_xy_m))
             equivalent_radius_m = 0.5 * max(pc1_m, pc2_m)
-            centre_ne = self.body_point_to_earth(centre_body)
-            length_axis_ne = self.body_vector_to_earth(length_axis_body)
+            # EKF measurements must stay in the fixed world frame so ownship
+            # translation and yaw do not appear as obstacle motion.
+            centre_ne = np.mean(cluster_points_ne, axis=0)
+            length_axis_ne = np.array([
+                reference_cos * length_axis_body[0] - reference_sin * length_axis_body[1],
+                reference_sin * length_axis_body[0] + reference_cos * length_axis_body[1],
+            ])
             centre_distance_m = float(np.linalg.norm(centre_body))
             centre_angle_rad = float(np.arctan2(centre_body[1], centre_body[0]))
             min_distance_m = float(np.min(np.linalg.norm(cluster_points, axis=1)))
+            measurement_covariance = self.obstacle_measurement_covariance(
+                centre_ne,
+                reference_pose,
+            )
 
             obstacles.append({
                 "label": int(label),
@@ -838,6 +908,7 @@ class LaptopController:
                 "length_axis_body": length_axis_body.tolist(),
                 "length_axis_ne": length_axis_ne.tolist(),
                 "equivalent_radius_m": equivalent_radius_m,
+                "measurement_covariance": measurement_covariance.tolist(),
             })
 
         obstacles.sort(key=lambda obstacle: obstacle["distance_m"])
@@ -1136,7 +1207,48 @@ class LaptopController:
         predicted_covariance = F @ covariance @ F.T + self.obstacle_ekf_process_noise(dt)
         return predicted_state, predicted_covariance
 
-    def obstacle_ekf_update(self, state, covariance, measurement_ne):
+    def obstacle_measurement_covariance(self, measurement_ne, reference_pose=None):
+        measurement_ne = np.asarray(measurement_ne, dtype=float).reshape(2)
+        if reference_pose is None:
+            reference_pose = getattr(self, "lidar_reference_pose", None)
+        if reference_pose is None:
+            reference_pose = np.asarray(self.p_robot, dtype=float).reshape(3)
+        else:
+            reference_pose = np.asarray(reference_pose, dtype=float).reshape(3)
+
+        base_variance = float(self.obstacle_ekf_measurement_std_m) ** 2
+        yaw_variance = 0.0
+        sigma = getattr(self, "Sigma", None)
+        if sigma is not None:
+            sigma = np.asarray(sigma, dtype=float)
+            if sigma.ndim == 2 and sigma.shape[0] > G and sigma.shape[1] > G:
+                yaw_variance = max(float(sigma[G, G]), 0.0)
+
+        yaw_rate_rad_s = getattr(self, "sensed_imu_yaw_rate_rad_s", None)
+        if yaw_rate_rad_s is None or not np.isfinite(yaw_rate_rad_s):
+            velocity = np.asarray(getattr(self, "v_robot", np.zeros((3, 1))), dtype=float).reshape(-1)
+            yaw_rate_rad_s = velocity[2] if len(velocity) > 2 else 0.0
+
+        timing_std_s = max(
+            float(getattr(self, "lidar_time_sync_std_s", 0.02)),
+            float(getattr(self, "lidar_scan_time_s", 0.0)) / np.sqrt(12.0),
+        )
+        yaw_variance += (float(yaw_rate_rad_s) * timing_std_s) ** 2
+
+        relative_ne = measurement_ne - reference_pose[0:2]
+        yaw_jacobian = np.array([-relative_ne[1], relative_ne[0]], dtype=float)
+        return (
+            base_variance * np.eye(2, dtype=float)
+            + yaw_variance * np.outer(yaw_jacobian, yaw_jacobian)
+        )
+
+    def obstacle_ekf_update(
+        self,
+        state,
+        covariance,
+        measurement_ne,
+        measurement_covariance=None,
+    ):
         state = np.asarray(state, dtype=float).reshape(4)
         covariance = np.asarray(covariance, dtype=float).reshape(4, 4)
         measurement_ne = np.asarray(measurement_ne, dtype=float).reshape(2)
@@ -1148,7 +1260,11 @@ class LaptopController:
             ],
             dtype=float,
         )
-        R_obs = (self.obstacle_ekf_measurement_std_m ** 2) * np.eye(2, dtype=float)
+        R_obs = (
+            self.obstacle_measurement_covariance(measurement_ne)
+            if measurement_covariance is None
+            else np.asarray(measurement_covariance, dtype=float).reshape(2, 2)
+        )
         innovation = measurement_ne - H @ state
         innovation_covariance = H @ covariance @ H.T + R_obs
 
@@ -1231,18 +1347,16 @@ class LaptopController:
         if not np.isfinite(state).all():
             return np.empty((0, 2), dtype=float)
 
-        velocity_ne = np.asarray(track.get("velocity_mean_ne", state[2:4]), dtype=float).reshape(2)
-        if not np.isfinite(velocity_ne).all():
-            velocity_ne = state[2:4]
+        velocity_ne = state[2:4].copy()
 
         accel_ne = self.obstacle_track_prediction_accel_ne(track)
 
         step_s = max(float(self.obstacle_prediction_step_s), 1e-3)
-        collision_time_s = float(track.get("collision_time_s", np.nan))
-        if not np.isfinite(collision_time_s) or collision_time_s <= 0.0:
+        horizon_s = float(self.obstacle_prediction_horizon_s)
+        if not np.isfinite(horizon_s) or horizon_s <= 0.0:
             return np.empty((0, 2), dtype=float)
-        times = np.arange(0.0, collision_time_s, step_s, dtype=float)
-        times = np.r_[times, collision_time_s]
+        times = np.arange(0.0, horizon_s, step_s, dtype=float)
+        times = np.r_[times, horizon_s]
 
         return np.column_stack(
             [
@@ -1275,25 +1389,30 @@ class LaptopController:
             else np.array([1.0, 0.0], dtype=float)
         )
 
-        display_velocity_ne = np.asarray(track.get("velocity_mean_ne", track["vel_ne"]), dtype=float).reshape(2)
-        if not np.isfinite(display_velocity_ne).all():
-            display_velocity_ne = track["vel_ne"]
-
-        speed_m_s = float(np.linalg.norm(display_velocity_ne))
+        ekf_velocity_ne = track["vel_ne"].copy()
+        speed_m_s = float(np.linalg.norm(ekf_velocity_ne))
         track["speed_m_s"] = speed_m_s
-        if speed_m_s >= 1e-3:
-            heading_rad = float(np.arctan2(display_velocity_ne[1], display_velocity_ne[0]))
+        heading_hold_speed_m_s = float(
+            getattr(self, "obstacle_heading_hold_speed_m_s", 0.03)
+        )
+        if speed_m_s >= heading_hold_speed_m_s:
+            heading_rad = float(np.arctan2(ekf_velocity_ne[1], ekf_velocity_ne[0]))
             track["heading_rad"] = heading_rad
             track["heading_deg"] = float(np.rad2deg(heading_rad))
-            track["heading_axis_ne"] = (
-                display_velocity_ne / speed_m_s
-                if bool(track.get("motion_stable", False))
-                else track["length_axis_ne"].copy()
-            )
+            track["heading_axis_ne"] = ekf_velocity_ne / speed_m_s
         else:
-            track["heading_rad"] = np.nan
-            track["heading_deg"] = np.nan
-            track["heading_axis_ne"] = track["length_axis_ne"].copy()
+            previous_heading_rad = float(track.get("heading_rad", np.nan))
+            if not np.isfinite(previous_heading_rad):
+                previous_heading_rad = float(np.arctan2(
+                    track["length_axis_ne"][1],
+                    track["length_axis_ne"][0],
+                ))
+            track["heading_rad"] = previous_heading_rad
+            track["heading_deg"] = float(np.rad2deg(previous_heading_rad))
+            track["heading_axis_ne"] = np.array([
+                np.cos(previous_heading_rad),
+                np.sin(previous_heading_rad),
+            ])
 
         if not self.obstacle_ekf_prediction_enabled:
             track["prediction_model"] = "disabled"
@@ -1415,7 +1534,11 @@ class LaptopController:
                     del lidar_history[:-self.obstacle_history_len]
 
         speed_m_s = float(np.linalg.norm(vel_ne))
-        heading_rad = float(np.arctan2(vel_ne[1], vel_ne[0])) if speed_m_s >= self.apf_dynamic_speed_threshold_m_s else np.nan
+        heading_rad = (
+            float(np.arctan2(vel_ne[1], vel_ne[0]))
+            if speed_m_s >= self.obstacle_heading_hold_speed_m_s
+            else float(track.get("heading_rad", np.nan))
+        )
         motion_window = track.setdefault("motion_window", [])
         motion_window.append({
             "stamp_s": stamp_s,
@@ -1463,15 +1586,7 @@ class LaptopController:
         velocities = np.asarray([sample["vel_ne"] for sample in samples], dtype=float)
         finite_vel = np.isfinite(velocities).all(axis=1)
         velocities = velocities[finite_vel]
-        sample_times = np.asarray([float(sample.get("stamp_s", 0.0)) for sample in samples], dtype=float)
-        sample_positions = np.asarray([sample["pos_ne"] for sample in samples], dtype=float)
-        time_span_s = float(np.ptp(sample_times)) if len(sample_times) > 1 else 0.0
-        if len(samples) >= 3 and time_span_s >= 0.4:
-            centred_times = sample_times - float(np.mean(sample_times))
-            design = np.column_stack([centred_times, np.ones_like(centred_times)])
-            fit, _, _, _ = np.linalg.lstsq(design, sample_positions, rcond=None)
-            track["velocity_mean_ne"] = fit[0]
-        elif len(velocities) > 0:
+        if len(velocities) > 0:
             track["velocity_mean_ne"] = np.mean(velocities, axis=0)
         else:
             track["velocity_mean_ne"] = np.asarray(track.get("vel_ne", [0.0, 0.0]), dtype=float).reshape(2)
@@ -1633,8 +1748,22 @@ class LaptopController:
                     obstacle.get("length_axis_ne", [1.0, 0.0]),
                     dtype=float,
                 ).reshape(2)
+                measurement_covariance = np.asarray(
+                    obstacle.get(
+                        "measurement_covariance",
+                        self.obstacle_measurement_covariance(centre_ne),
+                    ),
+                    dtype=float,
+                ).reshape(2, 2)
                 detections.append(
-                    (obstacle_index, centre_ne, pc1_m, pc2_m, length_axis_ne)
+                    (
+                        obstacle_index,
+                        centre_ne,
+                        pc1_m,
+                        pc2_m,
+                        length_axis_ne,
+                        measurement_covariance,
+                    )
                 )
 
         if not detections:
@@ -1646,7 +1775,7 @@ class LaptopController:
             return
 
         detection_positions = np.asarray(
-            [detection for _, detection, _, _, _ in detections],
+            [detection for _, detection, _, _, _, _ in detections],
             dtype=float,
         )
         predicted_tracks = []
@@ -1684,6 +1813,7 @@ class LaptopController:
                 predicted_state,
                 predicted_covariance,
                 detection,
+                detections[detection_index][5],
             )
 
             track["state"] = corrected_state
@@ -1718,7 +1848,7 @@ class LaptopController:
             if detection_index in assigned_detections:
                 continue
 
-            _, detection_ne, pc1_m, pc2_m, length_axis_ne = detection
+            _, detection_ne, pc1_m, pc2_m, length_axis_ne, _ = detection
             track = self.make_obstacle_track(
                 detection_ne,
                 now,
@@ -1731,7 +1861,7 @@ class LaptopController:
             detection_track[detection_index] = track
 
         for detection_index, track in detection_track.items():
-            obstacle_index, _, _, _, _ = detections[detection_index]
+            obstacle_index, _, _, _, _, _ = detections[detection_index]
             self.annotate_lidar_obstacle_with_track(self.lidar_obstacles[obstacle_index], track)
 
         self.prune_obstacle_tracks(now)
@@ -1752,11 +1882,11 @@ class LaptopController:
                 track.get("covariance", np.eye(4, dtype=float)),
                 max(now - float(track.get("stamp_s", now)), 0.0),
             )
-            velocity_ne = np.asarray(track.get("velocity_mean_ne", state[2:4]), dtype=float).reshape(2)
-            if not np.isfinite(velocity_ne).all():
-                velocity_ne = state[2:4]
+            velocity_ne = state[2:4].copy()
             speed_m_s = float(np.linalg.norm(velocity_ne))
-            heading_rad = float(np.arctan2(velocity_ne[1], velocity_ne[0])) if speed_m_s >= 1e-3 else np.nan
+            heading_rad = float(track.get("heading_rad", np.nan))
+            if speed_m_s >= self.obstacle_heading_hold_speed_m_s:
+                heading_rad = float(np.arctan2(velocity_ne[1], velocity_ne[0]))
 
             # Preserve the complete statistical state so the visualised
             # trajectory uses the same acceleration/stability gates as the
@@ -2013,13 +2143,7 @@ class LaptopController:
         if not np.isfinite(state).all():
             return None, None
 
-        if int(track.get("stats_sample_count", 0)) >= 2:
-            velocity_ne = np.asarray(track.get("velocity_mean_ne", state[2:4]), dtype=float).reshape(2)
-        else:
-            velocity_ne = state[2:4].copy()
-
-        if not np.isfinite(velocity_ne).all():
-            velocity_ne = state[2:4].copy()
+        velocity_ne = state[2:4].copy()
 
         accel_ne = self.obstacle_track_prediction_accel_ne(track)
 
@@ -2042,7 +2166,7 @@ class LaptopController:
         for track in self.apf_obstacle_tracks:
             track["collision_time_s"] = np.nan
             track["virtual_position_ne"] = np.array([np.nan, np.nan], dtype=float)
-            track["prediction_ne"] = np.empty((0, 2), dtype=float)
+            track["prediction_ne"] = self.obstacle_track_prediction_ne(track)
             if now - float(track.get("last_seen_s", track.get("stamp_s", now))) > self.apf_track_timeout_s:
                 continue
             if not self.obstacle_track_motion_is_stable(track):
@@ -2059,7 +2183,7 @@ class LaptopController:
                 else current_obs_pos_ne
             )
             current_obs_vel_ne = np.asarray(
-                track.get("velocity_mean_ne", track.get("vel_ne", [0.0, 0.0])),
+                track.get("vel_ne", [0.0, 0.0]),
                 dtype=float,
             ).reshape(2)
             if (
@@ -2376,7 +2500,7 @@ class LaptopController:
         if track_motion_stable and np.isfinite(obstacle_velocity_ne).all():
             obs_vel_body = self.earth_vector_to_body(obstacle_velocity_ne)
         elif track_motion_stable and track is not None:
-            track_velocity_ne = np.asarray(track.get("velocity_mean_ne", track["vel_ne"]), dtype=float).reshape(2)
+            track_velocity_ne = np.asarray(track["vel_ne"], dtype=float).reshape(2)
             if not np.isfinite(track_velocity_ne).all():
                 track_velocity_ne = np.asarray(track["vel_ne"], dtype=float).reshape(2)
             obs_vel_body = self.earth_vector_to_body(track_velocity_ne)
@@ -3065,6 +3189,7 @@ class LaptopController:
             self.v_robot[0] = self.mu[DOTN]
             self.v_robot[1] = self.mu[DOTE]
             self.v_robot[2] = self.mu[DOTG]
+            self.last_nav_t = current_epoch_s
             self.Yaw = self.p_robot[2][0]
             self.North = self.p_robot[0][0]
             self.East = self.p_robot[1][0]

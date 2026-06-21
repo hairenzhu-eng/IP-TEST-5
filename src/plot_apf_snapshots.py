@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
-from matplotlib.patches import Ellipse
+from matplotlib.patches import Ellipse, Patch
 import numpy as np
 
 
@@ -395,8 +395,35 @@ def plot_snapshot(
         colorbar = fig.colorbar(contour, ax=ax, pad=0.02)
         colorbar.set_label("Total APF potential, U")
 
+    virtual_max = float(np.max(virtual_potential))
+    if virtual_max > 1e-9:
+        normalized_virtual = np.clip(virtual_potential / virtual_max, 0.0, 1.0)
+        ax.contourf(
+            east_grid,
+            north_grid,
+            normalized_virtual,
+            levels=[0.05, 0.2, 0.4, 0.6, 0.8, 1.01],
+            colors=["#00d5ff"],
+            alpha=0.18,
+            zorder=2,
+        )
+        ax.contour(
+            east_grid,
+            north_grid,
+            normalized_virtual,
+            levels=[0.2, 0.4, 0.6, 0.8],
+            colors="#00a8cc",
+            linewidths=0.8,
+            alpha=0.75,
+            zorder=2,
+        )
+
     settings = payload.get("apf_settings", {})
     settings = settings if isinstance(settings, dict) else {}
+    prediction_horizon_s = positive(
+        settings.get("obstacle_prediction_horizon_s"),
+        30.0,
+    )
     domain_level = float(k_obstacle) / np.e
     for obstacle in payload.get("clusters", []):
         if not isinstance(obstacle, dict):
@@ -597,8 +624,27 @@ def plot_snapshot(
                 linewidth=2.0,
                 marker=".",
                 markersize=4,
-                label="EKF predicted trajectory" if track_index == 0 else None,
+                label=(
+                    f"EKF predicted trajectory ({prediction_horizon_s:g} s)"
+                    if track_index == 0
+                    else None
+                ),
                 zorder=7,
+            )
+            ax.scatter(
+                [prediction[-1, 1]],
+                [prediction[-1, 0]],
+                marker="X",
+                s=65,
+                color="#ff7f0e",
+                edgecolor="black",
+                linewidth=0.6,
+                label=(
+                    f"Obstacle position at +{prediction_horizon_s:g} s"
+                    if track_index == 0
+                    else None
+                ),
+                zorder=8,
             )
 
     for virtual_index, virtual in enumerate(payload.get("virtual_obstacles", [])):
@@ -652,6 +698,14 @@ def plot_snapshot(
         handles.append(Line2D([0], [0], color="black", linewidth=1.0))
         labels.append("Measured-obstacle potential boundary")
     if float(np.max(virtual_potential)) > 1e-9:
+        handles.append(
+            Patch(
+                facecolor="#00d5ff",
+                edgecolor="#00a8cc",
+                alpha=0.3,
+            )
+        )
+        labels.append("Virtual repulsive potential field")
         handles.append(
             Line2D([0], [0], color="#00d5ff", linestyle="--", linewidth=1.5)
         )

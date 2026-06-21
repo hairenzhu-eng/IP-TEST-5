@@ -129,6 +129,24 @@ class ApfSnapshotTest(unittest.TestCase):
         self.assertAlmostEqual(bounds[1] - bounds[0], 20.0)
         self.assertAlmostEqual(bounds[3] - bounds[2], 20.0)
 
+    def test_map_extent_stays_twenty_metres_with_long_prediction(self):
+        snapshots = [
+            {
+                "payload": {
+                    "robot_pos": [0.0, 0.0],
+                    "tracks": [
+                        {
+                            "position_ne": [0.0, 0.0],
+                            "prediction_ne": [[0.0, 0.0], [30.0, 0.0]],
+                        }
+                    ],
+                }
+            }
+        ]
+        bounds = run_bounds(snapshots, 20.0)
+        self.assertAlmostEqual(bounds[1] - bounds[0], 20.0)
+        self.assertAlmostEqual(bounds[3] - bounds[2], 20.0)
+
 
 if __name__ == "__main__":
     unittest.main()
