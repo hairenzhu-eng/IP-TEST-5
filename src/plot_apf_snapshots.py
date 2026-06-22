@@ -30,6 +30,17 @@ def point(value):
     return value if np.isfinite(value).all() else None
 
 
+def point_cloud(value):
+    try:
+        cloud = np.asarray(value, dtype=float)
+    except (TypeError, ValueError):
+        return np.empty((0, 2), dtype=float)
+    if cloud.ndim != 2 or cloud.shape[1] < 2:
+        return np.empty((0, 2), dtype=float)
+    cloud = cloud[:, :2]
+    return cloud[np.isfinite(cloud).all(axis=1)]
+
+
 def positive(value, fallback):
     try:
         value = float(value)
@@ -157,9 +168,8 @@ def ellipse_potential(
         settings.get("avoidance_pc_scale"),
         settings.get("cluster_influence_scale", 6.0),
     )
-    own_radius_m = positive(settings.get("own_equivalent_radius_m"), 0.25)
-    semi_length_m = 0.5 * scale * pc1_m + own_radius_m
-    semi_width_m = 0.5 * scale * pc2_m + own_radius_m
+    semi_length_m = max(0.5 * scale * pc1_m, 1e-6)
+    semi_width_m = max(0.5 * scale * pc2_m, 1e-6)
     axis = normalized_axis(obstacle.get("length_axis_ne"))
     width_axis = np.array([-axis[1], axis[0]], dtype=float)
 
@@ -193,13 +203,12 @@ def segment_potential(
         settings.get("virtual_pc_scale"),
         settings.get("avoidance_pc_scale", 6.0),
     )
-    own_radius_m = positive(settings.get("own_equivalent_radius_m"), 0.25)
     segment = end - start
     segment_length_m = float(np.linalg.norm(segment))
     cluster_range_enabled = settings.get("cluster_range_enabled", True) is not False
     if cluster_range_enabled and segment_length_m >= 1e-9:
         axis = segment / segment_length_m
-        extension_m = 0.5 * scale * pc1_m
+        extension_m = max(0.5 * scale * pc1_m, 1e-6)
         start = start - extension_m * axis
         end = end + extension_m * axis
         segment = end - start
@@ -225,7 +234,7 @@ def segment_potential(
             k_obstacle,
         )
 
-    corridor_radius_m = 0.5 * scale * pc2_m + own_radius_m
+    corridor_radius_m = max(0.5 * scale * pc2_m, 1e-6)
     level = distance_grid / corridor_radius_m
     return float(k_obstacle) * np.exp(-(level ** 4))
 
@@ -294,6 +303,9 @@ def all_run_points(snapshots):
         candidate = point(payload.get("robot_pos"))
         if candidate is not None:
             points.append(candidate)
+        cloud = point_cloud(payload.get("cloud", []))
+        if len(cloud):
+            points.extend(cloud)
         for collection_name in ("clusters", "tracks"):
             for item in payload.get(collection_name, []):
                 if not isinstance(item, dict):
@@ -525,6 +537,18 @@ def plot_snapshot(
         label="OS current position",
         zorder=8,
     )
+    cloud = point_cloud(payload.get("cloud", []))
+    if len(cloud):
+        ax.scatter(
+            cloud[:, 1],
+            cloud[:, 0],
+            marker=".",
+            s=8,
+            color="#7f7f7f",
+            alpha=0.65,
+            label="LiDAR point cloud (earth frame)",
+            zorder=4,
+        )
     if target_ne is not None:
         ax.scatter(
             [target_ne[1]],
@@ -807,8 +831,8 @@ def generate_snapshots(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Generate APF snapshots containing measured and virtual potential "
-            "fields, OS history, obstacle positions, and EKF predictions."
+            "Generate APF snapshots containing the earth-frame LiDAR cloud, "
+            "OS history, obstacle positions, and EKF predictions."
         )
     )
     parser.add_argument(

@@ -65,7 +65,12 @@ class Window(QWidget):
         est_position = LiveScatterPlot(symbol = 'o', size = 4, pen = 'blue', name = 'Estimated Position')
         measured_position = LiveScatterPlot(symbol = 'x', pen = 'cyan', name = 'Measured Position')
         waypoints = LiveScatterPlot(symbol = '+', size = 8, pen = 'red', name = 'Waypoints')
-        lidar = LiveScatterPlot(symbol = 'o', size = 1, pen = 'w', name = 'Lidar')
+        lidar = LiveScatterPlot(
+            symbol='o',
+            size=1,
+            pen='w',
+            name='LiDAR point cloud (earth frame)',
+        )
         corners = LiveScatterPlot(symbol = '+', size = 10, pen = 'g', name = 'Detected Corners')
         
         # Data connectors for each plot with dequeue of 600 points
@@ -151,7 +156,7 @@ class Window(QWidget):
 
         # 3) Other layers# 3) Other layers
         leg.addItem(waypoints, 'Waypoints')
-        leg.addItem(lidar, 'Lidar')
+        leg.addItem(lidar, 'LiDAR point cloud (earth frame)')
         leg.addItem(corners, 'Detected Corners')
 
         self.update_timer = QTimer(self)

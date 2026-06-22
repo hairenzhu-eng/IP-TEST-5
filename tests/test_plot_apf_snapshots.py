@@ -11,6 +11,7 @@ from plot_apf_snapshots import (  # noqa: E402
     classic_repulsive_potential,
     ellipse_potential,
     obstacle_ellipse_geometry,
+    point_cloud,
     run_bounds,
     segment_potential,
     select_snapshot_indices,
@@ -24,6 +25,10 @@ class ApfSnapshotTest(unittest.TestCase):
             for value in (0.0, 1.0, 4.9, 5.2, 9.8, 10.3)
         ]
         self.assertEqual(select_snapshot_indices(snapshots, 5.0), [0, 2, 4])
+
+    def test_world_frame_cloud_filters_invalid_points(self):
+        cloud = point_cloud([[1.0, 2.0], [np.nan, 3.0], [4.0, 5.0]])
+        np.testing.assert_allclose(cloud, [[1.0, 2.0], [4.0, 5.0]])
 
     def test_attractive_potential_matches_notebook_equation(self):
         north = np.array([[0.0, 2.0]])
@@ -122,7 +127,12 @@ class ApfSnapshotTest(unittest.TestCase):
 
     def test_map_extent_is_fixed_twenty_by_twenty_metres(self):
         snapshots = [
-            {"payload": {"robot_pos": [0.0, 0.0]}},
+            {
+                "payload": {
+                    "robot_pos": [0.0, 0.0],
+                    "cloud": [[-5.0, -4.0], [4.0, 3.0]],
+                }
+            },
             {"payload": {"robot_pos": [10.0, 2.0]}},
         ]
         bounds = run_bounds(snapshots, 20.0)

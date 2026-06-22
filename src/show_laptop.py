@@ -57,7 +57,12 @@ class ShowLaptop(QWidget):
         positionplot = LiveLinePlot(pen = 'blue', name = 'Model Path')
         ARUCOplot = LiveScatterPlot(symbol = 'x', pen = 'green', name = 'ARUCO Sensed Position')
         WayPoint = LiveScatterPlot(symbol = 'o', pen = 'red', name = 'Waypoints')
-        lidarplot = LiveScatterPlot(symbol = 'o', size = 1, pen = 'w', name = 'Lidar')
+        lidarplot = LiveScatterPlot(
+            symbol='o',
+            size=1,
+            pen='w',
+            name='LiDAR point cloud (earth frame)',
+        )
         plannedPathPlot = LiveLinePlot(pen = 'gray', name = 'Planned Path')
         apfForcePlot = LiveLinePlot(pen = 'yellow', name = 'APF Total Force')
         apfRepulsivePlot = LiveLinePlot(pen = 'magenta', name = 'APF Repulsive Force')
