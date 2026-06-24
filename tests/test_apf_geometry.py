@@ -667,6 +667,87 @@ class ApfGeometryTest(unittest.TestCase):
         )
         self.assertEqual((encounter, side), ("crossing_from_port", 0.0))
 
+    def test_colreg_scenarios_use_different_field_ranges(self):
+        controller = LaptopController.__new__(LaptopController)
+        controller.apf_cluster_range_enabled = True
+        controller.apf_own_equivalent_radius_m = 0.0
+        controller.obstacle_min_pc1_m = 0.3
+        controller.obstacle_min_pc2_m = 0.16
+        controller.apf_overtaking_longitudinal_scale = 0.75
+        controller.apf_overtaking_lateral_scale = 0.65
+        controller.apf_crossing_longitudinal_scale = 1.1
+        controller.apf_crossing_lateral_scale = 3.2
+        controller.apf_head_on_longitudinal_scale = 1.3
+        controller.apf_head_on_lateral_scale = 1.2
+
+        obstacle = {"pc1_m": 4.0, "pc2_m": 1.0}
+        axis = [1.0, 0.0]
+
+        overtaking_level, _ = controller.apf_point_level_and_away(
+            [0.0, 1.5],
+            obstacle,
+            1.0,
+            axis,
+            encounter="overtaking",
+        )
+        crossing_level, _ = controller.apf_point_level_and_away(
+            [0.0, 1.5],
+            obstacle,
+            1.0,
+            axis,
+            encounter="crossing_from_starboard",
+        )
+        head_on_level, _ = controller.apf_point_level_and_away(
+            [2.1, 0.0],
+            obstacle,
+            1.0,
+            axis,
+            encounter="head_on",
+        )
+        static_level, _ = controller.apf_point_level_and_away(
+            [2.1, 0.0],
+            obstacle,
+            1.0,
+            axis,
+        )
+
+        self.assertGreater(overtaking_level, 1.0)
+        self.assertLess(crossing_level, 1.0)
+        self.assertLess(head_on_level, static_level)
+
+    def test_colreg_scenarios_use_different_speed_logic(self):
+        controller = LaptopController.__new__(LaptopController)
+        controller.route_tracking_speed_m_s = 0.2
+        controller.apf_constant_descent_speed_m_s = 0.2
+        controller.apf_overtaking_surge_m_s = 0.26
+        controller.apf_crossing_min_forward_speed = 0.18
+        controller.apf_crossing_close_quarters_surge_m_s = 0.22
+        controller.apf_head_on_surge_m_s = 0.16
+        controller.apf_min_forward_speed = 0.1
+        controller.apf_heading_step_limit_rad = np.deg2rad(60.0)
+        controller.v_max = 0.3
+        controller.apf_close_quarters_surge_m_s = 0.14
+
+        overtaking_speed = controller.apf_encounter_speed_m_s(
+            "overtaking",
+            0.8,
+            0.0,
+        )
+        crossing_speed = controller.apf_encounter_speed_m_s(
+            "crossing_from_starboard",
+            0.7,
+            0.0,
+        )
+        head_on_speed = controller.apf_encounter_speed_m_s(
+            "head_on",
+            0.7,
+            np.deg2rad(45.0),
+        )
+
+        self.assertGreater(overtaking_speed, controller.apf_constant_descent_speed_m_s)
+        self.assertGreaterEqual(crossing_speed, controller.apf_crossing_close_quarters_surge_m_s)
+        self.assertLess(head_on_speed, controller.apf_constant_descent_speed_m_s)
+
 
 if __name__ == "__main__":
     unittest.main()
