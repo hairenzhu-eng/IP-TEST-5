@@ -449,6 +449,13 @@ class LaptopController:
         self.apf_side_lock_active = False
         self.apf_visual_hold_s = 2.0
         self.apf_visual_hold_until_s = 0.0
+        # Encounter-specific APF tuning profiles.  Crossing keeps the original
+        # values exactly so its avoidance trajectory is unchanged; overtaking
+        # and head-on get independent parameter sets in this file for isolated tuning.
+        self.apf_crossing_params = self.apf_build_encounter_params()
+        self.apf_overtaking_params = self.apf_build_encounter_params()
+        self.apf_head_on_params = self.apf_build_encounter_params()
+        self.apf_active_profile_name = "crossing"
         Console.info(
             "APF influence range:",
             (
@@ -1072,6 +1079,7 @@ class LaptopController:
             "apf": {
                 "navigation_mode": self.navigation_mode,
                 "encounter": self.apf_encounter_mode,
+                "active_profile": self.apf_active_profile_name,
                 "colreg_rule": self.apf_colreg_rule,
                 "side": self.apf_avoidance_side_sign,
                 "dcpa_m": self.apf_colreg_dcpa_m,
@@ -1101,6 +1109,9 @@ class LaptopController:
                 "avoidance_pc_scale": self.apf_avoidance_pc_scale,
                 "direction_pc_scale": self.apf_direction_pc_scale,
                 "virtual_pc_scale": self.apf_virtual_pc_scale,
+                "crossing_profile": self.apf_crossing_params,
+                "overtaking_profile": self.apf_overtaking_params,
+                "head_on_profile": self.apf_head_on_params,
                 "minimum_pc1_m": self.obstacle_min_pc1_m,
                 "minimum_pc2_m": self.obstacle_min_pc2_m,
             },
@@ -1125,6 +1136,7 @@ class LaptopController:
             self.apf_virtual_obstacles = []
             self.apf_visual_hold_until_s = 0.0
 
+        self.apf_active_profile_name = "crossing"
         self.apf_encounter_mode = "none"
         self.apf_colreg_rule = "none"
         self.apf_avoidance_side_sign = 0.0
@@ -1988,9 +2000,47 @@ class LaptopController:
     def apf_uses_cluster_range(self):
         return bool(getattr(self, "apf_cluster_range_enabled", True))
 
-    def apf_classic_qstar_m(self):
+    def apf_build_encounter_params(self, **overrides):
+        params = {
+            "cluster_range_enabled": bool(self.apf_cluster_range_enabled),
+            "classic_influence_distance_m": float(self.apf_classic_influence_distance_m),
+            "risk_pc_scale": float(self.apf_risk_pc_scale),
+            "avoidance_pc_scale": float(self.apf_avoidance_pc_scale),
+            "direction_pc_scale": float(self.apf_direction_pc_scale),
+            "virtual_pc_scale": float(self.apf_virtual_pc_scale),
+            "repulsive_gain": float(self.apf_repulsive_gain),
+            "dynamic_repulsive_gain": float(self.apf_dynamic_repulsive_gain),
+            "colreg_side_gain": float(self.apf_colreg_side_gain),
+            "route_lookahead_m": float(self.apf_route_lookahead_m),
+            "collision_horizon_s": float(self.apf_collision_horizon_s),
+            "constant_descent_speed_m_s": float(self.apf_constant_descent_speed_m_s),
+            "pass_astern_gain": float(self.apf_pass_astern_gain),
+            "dynamic_speed_threshold_m_s": float(self.apf_dynamic_speed_threshold_m_s),
+        }
+        params.update(overrides)
+        return params
+
+    def apf_profile_name_for_encounter(self, encounter):
+        if encounter == "overtaking":
+            return "overtaking"
+        if encounter == "head_on":
+            return "head_on"
+        return "crossing"
+
+    def apf_params_for_encounter(self, encounter=None):
+        profile_name = self.apf_profile_name_for_encounter(
+            self.apf_encounter_mode if encounter is None else encounter
+        )
+        if profile_name == "overtaking":
+            return self.apf_overtaking_params
+        if profile_name == "head_on":
+            return self.apf_head_on_params
+        return self.apf_crossing_params
+
+    def apf_classic_qstar_m(self, params=None):
+        params = self.apf_crossing_params if params is None else params
         return max(
-            float(getattr(self, "apf_classic_influence_distance_m", 3.0)),
+            float(params.get("classic_influence_distance_m", self.apf_classic_influence_distance_m)),
             1e-3,
         )
 
@@ -2000,11 +2050,13 @@ class LaptopController:
         obstacle,
         pc_scale,
         length_axis,
+        params=None,
     ):
         offset = np.asarray(offset, dtype=float).reshape(2)
         length_axis = np.asarray(length_axis, dtype=float).reshape(2)
+        params = self.apf_crossing_params if params is None else params
 
-        if not self.apf_uses_cluster_range():
+        if not bool(params.get("cluster_range_enabled", self.apf_cluster_range_enabled)):
             distance_m = float(np.linalg.norm(offset))
             axis_norm = float(np.linalg.norm(length_axis))
             fallback_away = (
@@ -2017,7 +2069,7 @@ class LaptopController:
                 if distance_m >= 1e-6
                 else fallback_away
             )
-            return distance_m / self.apf_classic_qstar_m(), away
+            return distance_m / self.apf_classic_qstar_m(params), away
 
         pc1_m, pc2_m = self.obstacle_pc_dimensions(obstacle)
         return ellipse_level_and_away(
@@ -2027,22 +2079,25 @@ class LaptopController:
             0.5 * pc_scale * pc2_m + self.apf_own_equivalent_radius_m,
         )
 
-    def apf_repulsive_weight(self, field_level):
-        if self.apf_uses_cluster_range():
+    def apf_repulsive_weight(self, field_level, params=None):
+        params = self.apf_crossing_params if params is None else params
+        if bool(params.get("cluster_range_enabled", self.apf_cluster_range_enabled)):
             return linear_field_weight(field_level)
-        qstar_m = self.apf_classic_qstar_m()
+        qstar_m = self.apf_classic_qstar_m(params)
         return classic_apf_repulsive_gradient_weight(
             float(field_level) * qstar_m,
             qstar_m,
         )
 
-    def apf_direction_clearance_m(self, obstacle):
-        if not self.apf_uses_cluster_range():
-            return self.apf_classic_qstar_m()
+    def apf_direction_clearance_m(self, obstacle, params=None):
+        params = self.apf_crossing_params if params is None else params
+        if not bool(params.get("cluster_range_enabled", self.apf_cluster_range_enabled)):
+            return self.apf_classic_qstar_m(params)
         _, pc2_m = self.obstacle_pc_dimensions(obstacle)
-        return 0.5 * self.apf_direction_pc_scale * pc2_m
+        return 0.5 * float(params.get("direction_pc_scale", self.apf_direction_pc_scale)) * pc2_m
 
-    def apf_obstacle_level_and_away(self, obstacle, pc_scale):
+    def apf_obstacle_level_and_away(self, obstacle, pc_scale, params=None):
+        params = self.apf_crossing_params if params is None else params
         is_segment = bool(obstacle.get("virtual", False)) and (
             "segment_start_ne" in obstacle and "segment_end_ne" in obstacle
         )
@@ -2054,7 +2109,7 @@ class LaptopController:
             segment_norm = float(np.linalg.norm(segment))
             if segment_norm >= 1e-6:
                 axis_body = segment / segment_norm
-                if self.apf_uses_cluster_range():
+                if bool(params.get("cluster_range_enabled", self.apf_cluster_range_enabled)):
                     pc1_m, pc2_m = self.obstacle_pc_dimensions(obstacle)
                     extension_m = 0.5 * pc_scale * pc1_m
                     start_body = start_body - extension_m * axis_body
@@ -2064,7 +2119,7 @@ class LaptopController:
                         + self.apf_own_equivalent_radius_m
                     )
                 else:
-                    corridor_radius_m = self.apf_classic_qstar_m()
+                    corridor_radius_m = self.apf_classic_qstar_m(params)
                 closest_body = closest_point_on_segment(
                     np.zeros(2, dtype=float),
                     start_body,
@@ -2090,6 +2145,7 @@ class LaptopController:
             obstacle,
             pc_scale,
             axis_body,
+            params=params,
         )
 
     def apf_cpa_metrics(self, obs_pos_body, obs_vel_body, own_vel_body):
@@ -2481,10 +2537,48 @@ class LaptopController:
         magnitude = self.apf_goal_gain * min(distance_m, self.apf_attraction_saturation_m)
         return magnitude * target_body / distance_m
 
-    def apf_repulsion_for_obstacle(self, obstacle, target_body, own_vel_body):
+    def apf_primary_encounter_mode(self):
+        own_vel_body = self.current_velocity_body()
+        obstacles = self.lidar_obstacles + self.update_apf_virtual_obstacles()
+        saw_crossing = False
+
+        for obstacle in obstacles:
+            obs_pos_body = np.asarray(obstacle.get("centre_body", [np.nan, np.nan]), dtype=float).reshape(2)
+            if not np.isfinite(obs_pos_body).all():
+                continue
+
+            angle_rad = abs(wrap_angle(float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))))
+            if (
+                not bool(obstacle.get("virtual", False))
+                and angle_rad > self.apf_activation_front_half_angle_rad
+            ):
+                continue
+
+            if bool(obstacle.get("virtual", False)):
+                encounter = str(obstacle.get("encounter_mode", "crossing"))
+            else:
+                track = self.apf_track_for_obstacle(obstacle)
+                if track is None or not self.obstacle_track_motion_is_stable(track):
+                    continue
+                track_velocity_ne = np.asarray(track.get("vel_ne", [np.nan, np.nan]), dtype=float).reshape(2)
+                if not np.isfinite(track_velocity_ne).all():
+                    continue
+                obs_vel_body = self.earth_vector_to_body(track_velocity_ne)
+                encounter, _, _ = self.apf_classify_encounter(obs_pos_body, obs_vel_body, own_vel_body)
+
+            if encounter == "head_on":
+                return "head_on"
+            if encounter == "overtaking":
+                return "overtaking"
+            if encounter in {"crossing_from_starboard", "crossing_from_port"}:
+                saw_crossing = True
+
+        return "crossing" if saw_crossing else "crossing"
+
+    def apf_repulsion_for_obstacle_crossing(self, obstacle, target_body, own_vel_body):
         obs_pos_body = np.asarray(obstacle.get("centre_body", [np.nan, np.nan]), dtype=float).reshape(2)
         if not np.isfinite(obs_pos_body).all():
-            return np.zeros(2, dtype=float), False
+            return np.zeros(2, dtype=float), False, self.apf_crossing_params
 
         is_virtual = bool(obstacle.get("virtual", False))
         track = None if is_virtual else self.apf_track_for_obstacle(obstacle)
@@ -2505,7 +2599,6 @@ class LaptopController:
                 track_velocity_ne = np.asarray(track["vel_ne"], dtype=float).reshape(2)
             obs_vel_body = self.earth_vector_to_body(track_velocity_ne)
 
-        distance_m = max(float(np.linalg.norm(obs_pos_body)), 1e-3)
         obs_dir = obs_pos_body / max(float(np.linalg.norm(obs_pos_body)), 1e-3)
         rel_vel_body = np.asarray(own_vel_body, dtype=float).reshape(2) - obs_vel_body
         closing_speed = float(np.dot(rel_vel_body, obs_dir))
@@ -2530,7 +2623,7 @@ class LaptopController:
         active = field_level <= 1.0 and (in_front_sector or is_virtual)
 
         if not active:
-            return np.zeros(2, dtype=float), False
+            return np.zeros(2, dtype=float), False, self.apf_crossing_params
 
         tcpa_s = np.nan
         dcpa_m = np.nan
@@ -2567,13 +2660,14 @@ class LaptopController:
                 )
             )
             if encounter == "crossing_from_port" and not risk:
+                self.apf_active_profile_name = "crossing"
                 self.apf_encounter_mode = encounter
                 self.apf_colreg_rule = rule
                 self.apf_avoidance_side_sign = 0.0
                 self.apf_colreg_dcpa_m = dcpa_m
                 self.apf_colreg_tcpa_s = tcpa_s
                 self.apf_colreg_active = False
-                return np.zeros(2, dtype=float), False
+                return np.zeros(2, dtype=float), False, self.apf_crossing_params
         elif not is_virtual:
             risk = self.apf_obstacle_level_and_away(
                 obstacle,
@@ -2666,6 +2760,7 @@ class LaptopController:
                 force += side_force
 
             if risk:
+                self.apf_active_profile_name = "crossing"
                 self.apf_encounter_mode = encounter
                 self.apf_colreg_rule = rule
                 self.apf_avoidance_side_sign = side_sign
@@ -2673,9 +2768,9 @@ class LaptopController:
                 self.apf_colreg_tcpa_s = tcpa_s
                 self.apf_colreg_active = side_sign != 0.0
 
-        return force, True
+        return force, True, self.apf_crossing_params
 
-    def apf_avoidance_needed(self):
+    def apf_avoidance_needed_crossing(self):
         front_is_blocked = self.front_blocked()
         virtual_obstacles = self.update_apf_virtual_obstacles()
         nearest_forward_level = np.inf
@@ -2706,7 +2801,7 @@ class LaptopController:
 
         return self.refresh_apf_side_lock(nearest_forward_level)
 
-    def compute_apf_control(self, t, u_track):
+    def compute_apf_control_crossing(self, t, u_track):
         final_approach = self.final_approach_active()
         if final_approach:
             target_ne = self.goal_ne.copy()
@@ -2736,7 +2831,7 @@ class LaptopController:
                 secondary_obstacles.append(obstacle)
 
         for obstacle in priority_obstacles:
-            repulsion, active = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
+            repulsion, active, _ = self.apf_repulsion_for_obstacle_crossing(obstacle, target_body, own_vel_body)
             repulsive_force += repulsion
             force_body += repulsion
             any_repulsion = any_repulsion or active
@@ -2748,7 +2843,7 @@ class LaptopController:
 
         if not any_repulsion:
             for obstacle in secondary_obstacles:
-                repulsion, active = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
+                repulsion, active, _ = self.apf_repulsion_for_obstacle_crossing(obstacle, target_body, own_vel_body)
                 repulsive_force += repulsion
                 force_body += repulsion
                 any_repulsion = any_repulsion or active
@@ -2756,6 +2851,429 @@ class LaptopController:
                     clearance_offset_m = max(
                         clearance_offset_m,
                         self.apf_direction_clearance_m(obstacle),
+                    )
+
+        if any_repulsion and self.apf_side_lock_sign != 0.0:
+            route_normal_left_ne = np.array(
+                [self.route_path_unit_ne[1], -self.route_path_unit_ne[0]],
+                dtype=float,
+            )
+            offset_target_ne = (
+                target_ne
+                + self.apf_side_lock_sign
+                * max(clearance_offset_m, self.obstacle_min_pc2_m)
+                * route_normal_left_ne
+            )
+            offset_target_body = self.earth_point_to_body(offset_target_ne)
+            offset_distance = float(np.linalg.norm(offset_target_body))
+            if offset_distance > 1e-6:
+                offset_force = (
+                    self.apf_clearance_gain
+                    * min(offset_distance, self.apf_attraction_saturation_m)
+                    * offset_target_body
+                    / offset_distance
+                )
+                force_body += offset_force
+                attractive_force += offset_force
+                self.apf_target_ne = offset_target_ne.copy()
+
+        self.apf_attractive_force_body = attractive_force
+        force_norm = float(np.linalg.norm(force_body))
+        if not np.isfinite(force_norm) or force_norm < 1e-6:
+            force_body = np.array([1e-3, 0.0], dtype=float)
+
+        self.apf_force_body = force_body
+        self.apf_repulsive_force_body = repulsive_force
+        steering_force = force_body.copy()
+        if any_repulsion and steering_force[0] <= 0.0:
+            side_sign = float(np.sign(steering_force[1]))
+
+            if side_sign == 0.0:
+                side_sign = self.apf_side_lock_sign
+
+            if side_sign == 0.0:
+                if self.left_clearance_m > self.right_clearance_m + 0.05:
+                    side_sign = 1.0
+                else:
+                    side_sign = -1.0
+
+            lateral_mag = max(abs(float(steering_force[1])), 0.5 * abs(float(force_body[0])), 0.20)
+            steering_force[1] = side_sign * lateral_mag
+            steering_force[0] = max(0.25 * lateral_mag, 0.05)
+
+        self.apf_steering_force_body = steering_force
+        now_s = float(self.timefromstart) if self.timefromstart is not None else 0.0
+        self.apf_visual_hold_until_s = now_s + self.apf_visual_hold_s
+        force_angle = wrap_angle(float(np.arctan2(steering_force[1], steering_force[0])))
+        force_angle = float(np.clip(force_angle, -self.apf_heading_step_limit_rad, self.apf_heading_step_limit_rad))
+
+        u_cmd = Vector(2)
+        u_cmd[1, 0] = np.clip(-self.apf_heading_gain * force_angle / max(self.lastdt, 1e-3), -self.w_max, self.w_max)
+        u_cmd[0, 0] = float(
+            np.clip(
+                self.apf_constant_descent_speed_m_s,
+                0.0,
+                self.v_max,
+            )
+        )
+
+        if any_repulsion or self.apf_colreg_active or self.apf_side_lock_active:
+            if self.apf_colreg_active:
+                self.navigation_mode = "apf_colreg"
+            else:
+                self.navigation_mode = "apf_avoid"
+        else:
+            self.navigation_mode = "apf_track"
+
+        self.apf_active_profile_name = "crossing"
+        return u_cmd
+
+    def apf_repulsion_for_obstacle(self, obstacle, target_body, own_vel_body):
+        obs_pos_body = np.asarray(obstacle.get("centre_body", [np.nan, np.nan]), dtype=float).reshape(2)
+        if not np.isfinite(obs_pos_body).all():
+            return np.zeros(2, dtype=float), False, self.apf_crossing_params
+
+        is_virtual = bool(obstacle.get("virtual", False))
+        if is_virtual:
+            preliminary_encounter = str(obstacle.get("encounter_mode", "crossing"))
+        else:
+            preliminary_encounter = "crossing"
+            track = self.apf_track_for_obstacle(obstacle)
+            if track is not None and self.obstacle_track_motion_is_stable(track):
+                track_velocity_ne = np.asarray(track.get("vel_ne", [np.nan, np.nan]), dtype=float).reshape(2)
+                if np.isfinite(track_velocity_ne).all():
+                    preliminary_obs_vel_body = self.earth_vector_to_body(track_velocity_ne)
+                    preliminary_encounter, _, _ = self.apf_classify_encounter(
+                        obs_pos_body,
+                        preliminary_obs_vel_body,
+                        own_vel_body,
+                    )
+
+        if preliminary_encounter not in {"overtaking", "head_on"}:
+            return self.apf_repulsion_for_obstacle_crossing(obstacle, target_body, own_vel_body)
+
+        obs_pos_body = np.asarray(obstacle.get("centre_body", [np.nan, np.nan]), dtype=float).reshape(2)
+        if not np.isfinite(obs_pos_body).all():
+            return np.zeros(2, dtype=float), False, self.apf_crossing_params
+
+        is_virtual = bool(obstacle.get("virtual", False))
+        track = None if is_virtual else self.apf_track_for_obstacle(obstacle)
+        track_motion_stable = (
+            is_virtual
+            or (
+                track is not None
+                and self.obstacle_track_motion_is_stable(track)
+            )
+        )
+        obs_vel_body = np.zeros(2, dtype=float)
+        obstacle_velocity_ne = np.asarray(obstacle.get("velocity_ne", [np.nan, np.nan]), dtype=float).reshape(2)
+        if track_motion_stable and np.isfinite(obstacle_velocity_ne).all():
+            obs_vel_body = self.earth_vector_to_body(obstacle_velocity_ne)
+        elif track_motion_stable and track is not None:
+            track_velocity_ne = np.asarray(track["vel_ne"], dtype=float).reshape(2)
+            if not np.isfinite(track_velocity_ne).all():
+                track_velocity_ne = np.asarray(track["vel_ne"], dtype=float).reshape(2)
+            obs_vel_body = self.earth_vector_to_body(track_velocity_ne)
+
+        distance_m = max(float(np.linalg.norm(obs_pos_body)), 1e-3)
+        obs_dir = obs_pos_body / max(float(np.linalg.norm(obs_pos_body)), 1e-3)
+        rel_vel_body = np.asarray(own_vel_body, dtype=float).reshape(2) - obs_vel_body
+        closing_speed = float(np.dot(rel_vel_body, obs_dir))
+        rel_speed = float(np.linalg.norm(rel_vel_body))
+        pass_astern_side = self.apf_pass_astern_side_from_velocity(obs_vel_body)
+        encounter = "dynamic_virtual_obstacle" if is_virtual else "static_obstacle"
+        requested_side = 0.0
+        rule = "none"
+        params = self.apf_params_for_encounter(encounter)
+
+        def update_field_levels(current_params):
+            field_scale_local = (
+                float(current_params.get("virtual_pc_scale", self.apf_virtual_pc_scale))
+                if is_virtual
+                else float(current_params.get("avoidance_pc_scale", self.apf_avoidance_pc_scale))
+            )
+            field_level_local, away_dir_local = self.apf_obstacle_level_and_away(
+                obstacle,
+                field_scale_local,
+                params=current_params,
+            )
+            direction_level_local, _ = self.apf_obstacle_level_and_away(
+                obstacle,
+                float(current_params.get("direction_pc_scale", self.apf_direction_pc_scale)),
+                params=current_params,
+            )
+            return field_level_local, away_dir_local, direction_level_local
+
+        field_level, away_dir, direction_level = update_field_levels(params)
+
+        obstacle_angle = abs(wrap_angle(float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))))
+        in_front_sector = obstacle_angle <= self.apf_activation_front_half_angle_rad
+        active = field_level <= 1.0 and (in_front_sector or is_virtual)
+
+        if not active:
+            return np.zeros(2, dtype=float), False, params
+
+        tcpa_s = np.nan
+        dcpa_m = np.nan
+        risk = False
+        if not is_virtual and self.obstacle_ekf_prediction_enabled:
+            tcpa_s, dcpa_m = self.apf_cpa_metrics(obs_pos_body, obs_vel_body, own_vel_body)
+            encounter, requested_side, rule = self.apf_classify_encounter(obs_pos_body, obs_vel_body, own_vel_body)
+            params = self.apf_params_for_encounter(encounter)
+            field_level, away_dir, direction_level = update_field_levels(params)
+            current_risk_level, _ = self.apf_obstacle_level_and_away(
+                obstacle,
+                float(params.get("risk_pc_scale", self.apf_risk_pc_scale)),
+                params=params,
+            )
+            relative_position_at_cpa = (
+                obs_pos_body
+                + (obs_vel_body - np.asarray(own_vel_body, dtype=float).reshape(2))
+                * max(float(tcpa_s), 0.0)
+            )
+            axis_body = self.earth_vector_to_body(
+                self.obstacle_length_axis_ne(obstacle)
+            )
+            cpa_risk_level, _ = self.apf_point_level_and_away(
+                -relative_position_at_cpa,
+                obstacle,
+                float(params.get("risk_pc_scale", self.apf_risk_pc_scale)),
+                axis_body,
+                params=params,
+            )
+            risk = (
+                current_risk_level <= 1.0
+                or (
+                    tcpa_s <= float(params.get("collision_horizon_s", self.apf_collision_horizon_s))
+                    and cpa_risk_level <= 1.0
+                )
+            )
+            if encounter == "crossing_from_port" and not risk:
+                self.apf_active_profile_name = self.apf_profile_name_for_encounter(encounter)
+                self.apf_encounter_mode = encounter
+                self.apf_colreg_rule = rule
+                self.apf_avoidance_side_sign = 0.0
+                self.apf_colreg_dcpa_m = dcpa_m
+                self.apf_colreg_tcpa_s = tcpa_s
+                self.apf_colreg_active = False
+                return np.zeros(2, dtype=float), False, params
+        elif not is_virtual:
+            params = self.apf_params_for_encounter(encounter)
+            risk = self.apf_obstacle_level_and_away(
+                obstacle,
+                float(params.get("risk_pc_scale", self.apf_risk_pc_scale)),
+                params=params,
+            )[0] <= 1.0
+
+        repulsive_gain = self.apf_virtual_repulsive_gain if is_virtual else float(
+            params.get("repulsive_gain", self.apf_repulsive_gain)
+        )
+        proximity = self.apf_repulsive_weight(field_level, params=params)
+        force = repulsive_gain * proximity * away_dir
+
+        if is_virtual or risk or closing_speed > 0.0:
+            force += (
+                float(params.get("dynamic_repulsive_gain", self.apf_dynamic_repulsive_gain))
+                * max(closing_speed, 0.0)
+                * proximity
+                * away_dir
+            )
+            if is_virtual:
+                tcpa_s = float(obstacle.get("tcpa_s", np.nan))
+                dcpa_m = float(obstacle.get("dcpa_m", np.nan))
+                encounter = obstacle.get("encounter_mode", "dynamic_virtual_obstacle")
+                params = self.apf_params_for_encounter(encounter)
+                field_level, away_dir, direction_level = update_field_levels(params)
+                rule = obstacle.get("colreg_rule", "predicted collision point")
+                if encounter == "crossing_from_port":
+                    requested_side = -1.0
+                    rule = "COLREG Rule 17: stand-on reactive avoidance, alter to starboard"
+                    pass_astern_active = False
+                else:
+                    requested_side = float(obstacle.get("requested_side", 0.0))
+                    pass_astern_active = (
+                        encounter == "crossing_from_starboard"
+                        and pass_astern_side != 0.0
+                    )
+                    if pass_astern_active:
+                        requested_side = pass_astern_side
+                        rule = "predicted collision point: pass astern"
+                    elif requested_side == 0.0:
+                        requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
+                risk = True
+            else:
+                if encounter == "crossing_from_port" and risk:
+                    requested_side = -1.0
+                    rule = "COLREG Rule 17: stand-on reactive avoidance, alter to starboard"
+                    pass_astern_active = False
+                else:
+                    pass_astern_active = (
+                        risk
+                        and pass_astern_side != 0.0
+                        and encounter == "crossing_from_starboard"
+                    )
+                if pass_astern_active:
+                    requested_side = pass_astern_side
+
+            if risk and requested_side == 0.0 and encounter == "static_obstacle":
+                requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
+
+            if (
+                requested_side == 0.0
+                and in_front_sector
+                and encounter == "static_obstacle"
+            ):
+                requested_side = self.apf_default_side_from_obstacle(obs_pos_body)
+
+            side_sign = self.apf_lock_side(
+                requested_side if (risk or direction_level <= 1.0) else 0.0,
+                direction_level,
+            )
+            if pass_astern_active:
+                obs_speed = float(np.linalg.norm(obs_vel_body))
+                if obs_speed >= float(params.get("dynamic_speed_threshold_m_s", self.apf_dynamic_speed_threshold_m_s)):
+                    astern_dir = -obs_vel_body / max(obs_speed, 1e-6)
+                    force += (
+                        float(params.get("pass_astern_gain", self.apf_pass_astern_gain))
+                        * max(obs_speed, rel_speed, 0.25)
+                        * proximity
+                        * astern_dir
+                    )
+
+            if side_sign != 0.0:
+                lateral_dir = np.array([-obs_dir[1], obs_dir[0]], dtype=float)
+                rel_cross = obs_dir[0] * rel_vel_body[1] - obs_dir[1] * rel_vel_body[0]
+                theta_sin = abs(float(rel_cross)) / max(rel_speed, 1e-6)
+                side_force = (
+                    side_sign
+                    * float(params.get("colreg_side_gain", self.apf_colreg_side_gain))
+                    * max(rel_speed, 0.25)
+                    * max(theta_sin, 0.45)
+                    * proximity
+                    * lateral_dir
+                )
+                force += side_force
+
+            if risk:
+                self.apf_active_profile_name = self.apf_profile_name_for_encounter(encounter)
+                self.apf_encounter_mode = encounter
+                self.apf_colreg_rule = rule
+                self.apf_avoidance_side_sign = side_sign
+                self.apf_colreg_dcpa_m = dcpa_m
+                self.apf_colreg_tcpa_s = tcpa_s
+                self.apf_colreg_active = side_sign != 0.0
+
+        return force, True, params
+
+    def apf_avoidance_needed(self):
+        if self.apf_primary_encounter_mode() == "crossing":
+            return self.apf_avoidance_needed_crossing()
+
+        front_is_blocked = self.front_blocked()
+        virtual_obstacles = self.update_apf_virtual_obstacles()
+        nearest_forward_level = np.inf
+        obstacle_needs_avoidance = False
+
+        for obstacle in self.lidar_obstacles + virtual_obstacles:
+            obs_pos_body = np.asarray(obstacle.get("centre_body", [np.nan, np.nan]), dtype=float).reshape(2)
+            if not np.isfinite(obs_pos_body).all():
+                continue
+
+            params = self.apf_crossing_params
+            if bool(obstacle.get("virtual", False)):
+                params = self.apf_params_for_encounter(obstacle.get("encounter_mode", "dynamic_virtual_obstacle"))
+            elif self.obstacle_ekf_prediction_enabled:
+                track = self.apf_track_for_obstacle(obstacle)
+                if track is not None and self.obstacle_track_motion_is_stable(track):
+                    track_velocity_ne = np.asarray(track.get("vel_ne", [0.0, 0.0]), dtype=float).reshape(2)
+                    if np.isfinite(track_velocity_ne).all():
+                        obs_vel_body = self.earth_vector_to_body(track_velocity_ne)
+                        encounter, _, _ = self.apf_classify_encounter(
+                            obs_pos_body,
+                            obs_vel_body,
+                            self.current_velocity_body(),
+                        )
+                        params = self.apf_params_for_encounter(encounter)
+
+            angle_rad = abs(wrap_angle(float(np.arctan2(obs_pos_body[1], obs_pos_body[0]))))
+            if (
+                bool(obstacle.get("virtual", False))
+                or angle_rad <= self.apf_activation_front_half_angle_rad
+            ):
+                field_level, _ = self.apf_obstacle_level_and_away(
+                    obstacle,
+                    float(params.get("virtual_pc_scale", self.apf_virtual_pc_scale))
+                    if bool(obstacle.get("virtual", False))
+                    else float(params.get("avoidance_pc_scale", self.apf_avoidance_pc_scale)),
+                    params=params,
+                )
+                nearest_forward_level = min(nearest_forward_level, field_level)
+                if field_level <= 1.0:
+                    obstacle_needs_avoidance = True
+
+        if front_is_blocked or obstacle_needs_avoidance:
+            return True
+
+        return self.refresh_apf_side_lock(nearest_forward_level)
+
+    def compute_apf_control(self, t, u_track):
+        if self.apf_primary_encounter_mode() == "crossing":
+            return self.compute_apf_control_crossing(t, u_track)
+
+        active_params = self.apf_params_for_encounter(self.apf_primary_encounter_mode())
+        final_approach = self.final_approach_active()
+        if final_approach:
+            target_ne = self.goal_ne.copy()
+        else:
+            _, target_ne = self.route_progress_and_point(
+                float(active_params.get("route_lookahead_m", self.apf_route_lookahead_m))
+            )
+
+        target_body = self.earth_point_to_body(target_ne)
+        path_force = np.zeros(2, dtype=float) if final_approach else self.apf_path_attraction_body()
+        attractive_force = self.apf_goal_attraction_body(target_body) + path_force
+        force_body = attractive_force.copy()
+        repulsive_force = np.zeros(2, dtype=float)
+        own_vel_body = self.current_velocity_body()
+        any_repulsion = False
+        clearance_offset_m = 0.0
+        self.reset_apf_diagnostics()
+        self.apf_target_ne = target_ne.copy()
+        self.apf_attractive_force_body = attractive_force
+
+        virtual_obstacles = self.update_apf_virtual_obstacles()
+        obstacles = self.lidar_obstacles + virtual_obstacles
+        priority_obstacles = []
+        secondary_obstacles = []
+        for obstacle in obstacles:
+            if self.apf_obstacle_in_priority_front_sector(obstacle):
+                priority_obstacles.append(obstacle)
+            else:
+                secondary_obstacles.append(obstacle)
+
+        for obstacle in priority_obstacles:
+            repulsion, active, obstacle_params = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
+            repulsive_force += repulsion
+            force_body += repulsion
+            any_repulsion = any_repulsion or active
+            if active:
+                active_params = obstacle_params
+                clearance_offset_m = max(
+                    clearance_offset_m,
+                    self.apf_direction_clearance_m(obstacle, params=obstacle_params),
+                )
+
+        if not any_repulsion:
+            for obstacle in secondary_obstacles:
+                repulsion, active, obstacle_params = self.apf_repulsion_for_obstacle(obstacle, target_body, own_vel_body)
+                repulsive_force += repulsion
+                force_body += repulsion
+                any_repulsion = any_repulsion or active
+                if active:
+                    active_params = obstacle_params
+                    clearance_offset_m = max(
+                        clearance_offset_m,
+                        self.apf_direction_clearance_m(obstacle, params=obstacle_params),
                     )
 
         if any_repulsion and self.apf_side_lock_sign != 0.0:
@@ -2823,7 +3341,7 @@ class LaptopController:
         # changes the commanded heading.
         u_cmd[0, 0] = float(
             np.clip(
-                self.apf_constant_descent_speed_m_s,
+                float(active_params.get("constant_descent_speed_m_s", self.apf_constant_descent_speed_m_s)),
                 0.0,
                 self.v_max,
             )
