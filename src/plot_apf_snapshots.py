@@ -168,8 +168,9 @@ def ellipse_potential(
         settings.get("avoidance_pc_scale"),
         settings.get("cluster_influence_scale", 6.0),
     )
-    semi_length_m = max(0.5 * scale * pc1_m, 1e-6)
-    semi_width_m = max(0.5 * scale * pc2_m, 1e-6)
+    own_radius_m = positive(settings.get("own_equivalent_radius_m"), 0.0)
+    semi_length_m = max(0.5 * scale * pc1_m + own_radius_m, 1e-6)
+    semi_width_m = max(0.5 * scale * pc2_m + own_radius_m, 1e-6)
     axis = normalized_axis(obstacle.get("length_axis_ne"))
     width_axis = np.array([-axis[1], axis[0]], dtype=float)
 
