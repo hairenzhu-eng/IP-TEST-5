@@ -24,15 +24,19 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
 DEFAULT_OUTPUT_DIR = DEFAULT_LOGS_DIR / "generated_figures" / "colreg_size_trajectories"
-DEFAULT_LATEST_LIMIT = 5
-DEFAULT_RUN_DIRS: list[str] = [
-    "run_20260624_003938",
-    "run_20260624_004126",
-]
+DEFAULT_LATEST_LIMIT = 0
 
 TIME_COLUMNS = ("TimeFromStart(s)", "TimeFromStart", "elapsed [s]")
 OWN_NORTH_COLUMNS = ("North(m)", "North", "x [m]")
 OWN_EAST_COLUMNS = ("East(m)", "East", "y [m]")
+SWITCH_FLAGS = {
+    "ekf_on_cluster_on": (True, True),
+    "ekf_on_cluster_off": (True, False),
+    "ekf_off_cluster_on": (False, True),
+    "ekf_off_cluster_off": (False, False),
+}
+
+
 @dataclass
 class SnapshotSample:
     time_s: float
@@ -45,6 +49,10 @@ class SnapshotSample:
 class RunRecord:
     run_dir: Path
     log_path: Path
+    ekf_enabled: bool
+    size_enabled: bool
+    webots_environment: str
+    webots_pair_key: str
     trajectory_time_s: np.ndarray
     trajectory_ne_m: np.ndarray
     active_window_s: tuple[float, float]
@@ -79,6 +87,145 @@ def first_existing(row, names):
         if name in row:
             return row[name]
     return None
+
+
+def parse_bool(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return None
+
+
+def normalise_webots_name(value):
+    if value is None:
+        return "webots_unknown"
+    text = str(value).strip()
+    if not text:
+        return "webots_unknown"
+    if text.lower().endswith(".wbt"):
+        text = Path(text).stem
+    text = text.lower().replace("-", "_").replace(" ", "_")
+    token = "".join(char for char in text if char.isalnum() or char == "_")
+    return token or "webots_unknown"
+
+
+def webots_size_label(webots_environment):
+    tokens = webots_environment.split("_")
+    if "large" in tokens:
+        return "Large"
+    if "small" in tokens:
+        return "Small"
+    return None
+
+
+def webots_pair_key(webots_environment):
+    label = webots_size_label(webots_environment)
+    if label is None:
+        return None
+    return "_".join(
+        "size" if token in {"large", "small"} else token
+        for token in webots_environment.split("_")
+    )
+
+
+def flags_from_switch_name(value):
+    text = str(value or "").strip()
+    return SWITCH_FLAGS.get(text)
+
+
+def read_csv_metadata(log_path):
+    webots_environment = None
+    ekf_enabled = None
+    size_enabled = None
+
+    with log_path.open(newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames is None:
+            return ekf_enabled, size_enabled, webots_environment
+
+        for row in reader:
+            if webots_environment is None and "WebotsEnvironment" in row:
+                name = normalise_webots_name(row.get("WebotsEnvironment"))
+                if name not in {"webots_unknown", "not_webots"}:
+                    webots_environment = name
+
+            switch_flags = flags_from_switch_name(row.get("SwitchCombination"))
+            if switch_flags is not None:
+                ekf_enabled, size_enabled = switch_flags
+
+            if ekf_enabled is None:
+                ekf_enabled = parse_bool(row.get("EKFPredictionEnabled"))
+            if size_enabled is None:
+                size_enabled = parse_bool(row.get("ClusterSizeAPFEnabled"))
+
+            if (
+                webots_environment is not None
+                and ekf_enabled is not None
+                and size_enabled is not None
+            ):
+                break
+
+    return ekf_enabled, size_enabled, webots_environment
+
+
+def read_json_metadata(run_dir):
+    snapshot_paths = sorted(run_dir.glob("obstacle_*.json"))
+    if not snapshot_paths:
+        return None, None, None
+
+    sample_indices = sorted({0, len(snapshot_paths) // 2, len(snapshot_paths) - 1})
+    flags = []
+    names = []
+    for index in sample_indices:
+        try:
+            with snapshot_paths[index].open(encoding="utf-8") as stream:
+                payload = json.load(stream)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        for key in ("webots_environment", "WebotsEnvironment", "world", "world_file"):
+            name = normalise_webots_name(payload.get(key))
+            if name not in {"webots_unknown", "not_webots"}:
+                names.append(name)
+
+        settings = payload.get("apf_settings", {})
+        if not isinstance(settings, dict):
+            continue
+        if (
+            "obstacle_ekf_prediction_enabled" in settings
+            and "cluster_range_enabled" in settings
+        ):
+            flags.append(
+                (
+                    bool(settings["obstacle_ekf_prediction_enabled"]),
+                    bool(settings["cluster_range_enabled"]),
+                )
+            )
+
+    if flags and any(flag != flags[0] for flag in flags[1:]):
+        raise ValueError("Switch metadata changes within the run")
+    webots_environment = max(set(names), key=names.count) if names else None
+    return (
+        flags[0][0] if flags else None,
+        flags[0][1] if flags else None,
+        webots_environment,
+    )
+
+
+def read_run_metadata(run_dir, log_path):
+    ekf_enabled, size_enabled, webots_environment = read_csv_metadata(log_path)
+    json_ekf, json_size, json_webots = read_json_metadata(run_dir)
+    return (
+        ekf_enabled if ekf_enabled is not None else json_ekf,
+        size_enabled if size_enabled is not None else json_size,
+        webots_environment or json_webots or "webots_unknown",
+    )
 
 
 def point(value):
@@ -239,6 +386,14 @@ def build_run_record(run_dir):
     if log_path is None:
         return None
 
+    ekf_enabled, size_enabled, webots_environment = read_run_metadata(run_dir, log_path)
+    webots_pair = webots_pair_key(webots_environment)
+    size_label = webots_size_label(webots_environment)
+    if ekf_enabled is not True or size_enabled is not True:
+        return None
+    if webots_pair is None or size_label is None:
+        return None
+
     samples = collect_snapshot_samples(run_dir)
     if len(samples) < 3:
         return None
@@ -263,6 +418,10 @@ def build_run_record(run_dir):
     return RunRecord(
         run_dir=run_dir,
         log_path=log_path,
+        ekf_enabled=bool(ekf_enabled),
+        size_enabled=bool(size_enabled),
+        webots_environment=webots_environment,
+        webots_pair_key=webots_pair,
         trajectory_time_s=trajectory_time_s,
         trajectory_ne_m=trajectory_ne_m,
         active_window_s=active_window_s,
@@ -270,6 +429,7 @@ def build_run_record(run_dir):
         median_pc2_m=median_pc2_m,
         median_equivalent_radius_m=median_equivalent_radius_m,
         size_metric_m=float(size_metric_m),
+        size_label=size_label,
     )
 
 
@@ -299,39 +459,6 @@ def selected_run_dirs(logs_dir, run_dirs):
     return resolved
 
 
-def size_split_threshold(size_values):
-    sorted_values = np.sort(np.asarray(size_values, dtype=float))
-    if sorted_values.size < 2:
-        return np.nan
-    gaps = np.diff(sorted_values)
-    if gaps.size == 0:
-        return np.nan
-    best_index = int(np.argmax(gaps))
-    best_gap = float(gaps[best_index])
-    median_size = float(np.median(sorted_values))
-    minimum_gap = max(0.05, 0.08 * max(median_size, 1e-6))
-    if best_gap < minimum_gap:
-        return np.nan
-    return float(0.5 * (sorted_values[best_index] + sorted_values[best_index + 1]))
-
-
-def assign_size_labels(records):
-    size_values = [record.size_metric_m for record in records if np.isfinite(record.size_metric_m)]
-    threshold = size_split_threshold(size_values)
-    if not np.isfinite(threshold):
-        return False
-    has_small = False
-    has_large = False
-    for record in records:
-        if record.size_metric_m <= threshold:
-            record.size_label = "Small"
-            has_small = True
-        else:
-            record.size_label = "Large"
-            has_large = True
-    return has_small and has_large
-
-
 def segment_for_plot(record, padding_s):
     start_s, end_s = record.active_window_s
     lower_s = max(record.trajectory_time_s[0], start_s - padding_s)
@@ -346,7 +473,7 @@ def segment_for_plot(record, padding_s):
 
 
 def merged_output_name(records):
-    merged = "__".join(record.run_dir.name for record in records)
+    merged = "__".join(record.webots_environment for record in records)
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", merged).strip("_")
     return safe_name or "large_vs_small"
 
@@ -398,7 +525,7 @@ def plot_group(records, output_path, padding_s):
 
     ax.set_title(
         "Avoidance Trajectory Comparison\n"
-        "Large vs Small Obstacle Ships"
+        f"{records[0].webots_pair_key.replace('_', ' ').title()}: Large vs Small"
     )
 
     ax.set_xlabel("East (m)")
@@ -444,6 +571,18 @@ def collect_grouped_runs(
     return records
 
 
+def pair_large_small_records(records):
+    grouped = {}
+    for record in sorted(records, key=lambda item: item.run_dir.name, reverse=True):
+        group = grouped.setdefault(record.webots_pair_key, {})
+        group.setdefault(record.size_label, record)
+    return [
+        [group["Small"], group["Large"]]
+        for _, group in sorted(grouped.items())
+        if "Small" in group and "Large" in group
+    ]
+
+
 def plot_colreg_size_trajectories(
     logs_dir,
     output_dir,
@@ -457,16 +596,22 @@ def plot_colreg_size_trajectories(
         run_dirs=run_dirs,
     )
     if not records:
-        raise FileNotFoundError("No runs with usable obstacle snapshots were found")
+        raise FileNotFoundError(
+            "No EKF-on and size-on runs with usable obstacle snapshots were found"
+        )
 
-    if len(records) < 2:
-        raise ValueError("Need at least two valid runs to compare trajectories")
-    if not assign_size_labels(records):
-        raise ValueError("Could not split runs into distinct large and small ship cases")
+    pairs = pair_large_small_records(records)
+    if not pairs:
+        raise ValueError(
+            "No large/small Webots pairs were found with EKF and size both enabled"
+        )
 
-    output_path = output_dir / f"{merged_output_name(records)}.png"
-    plot_group(records, output_path, padding_s=padding_s)
-    return [(output_path, records)]
+    outputs = []
+    for pair in pairs:
+        output_path = output_dir / f"{merged_output_name(pair)}.png"
+        plot_group(pair, output_path, padding_s=padding_s)
+        outputs.append((output_path, pair))
+    return outputs
 
 
 def main():
@@ -488,7 +633,13 @@ def main():
         "--latest-limit",
         type=int,
         default=DEFAULT_LATEST_LIMIT,
-        help="Only scan the latest N run_* directories (default: 5).",
+        help="Only scan the latest N run_* directories (0 means all; default: 0).",
+    )
+    parser.add_argument(
+        "--run-dir",
+        action="append",
+        dest="run_dirs",
+        help="Explicit run_* directory to include. Repeat for multiple runs.",
     )
     args = parser.parse_args()
 
@@ -497,7 +648,7 @@ def main():
         output_dir=args.output_dir,
         padding_s=float(args.padding_s),
         latest_limit=args.latest_limit,
-        run_dirs=DEFAULT_RUN_DIRS,
+        run_dirs=args.run_dirs,
     )
 
     for output_path, records in outputs:

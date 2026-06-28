@@ -305,6 +305,24 @@ class ApfGeometryTest(unittest.TestCase):
         self.assertGreater(static_level, 1.0)
         self.assertLess(crossing_level, 1.0)
 
+    def test_crossing_strategy_forces_stern_when_obstacle_moves_right_to_left(self):
+        controller = LaptopController.__new__(LaptopController)
+        controller.apf_dynamic_speed_threshold_m_s = 0.05
+
+        strategy, side = controller.apf_crossing_strategy_from_velocity([0.0, 0.5])
+
+        self.assertEqual(strategy, "pass_astern")
+        self.assertLess(side, 0.0)
+
+    def test_crossing_strategy_forces_bow_when_obstacle_moves_left_to_right(self):
+        controller = LaptopController.__new__(LaptopController)
+        controller.apf_dynamic_speed_threshold_m_s = 0.05
+
+        strategy, side = controller.apf_crossing_strategy_from_velocity([0.0, -0.5])
+
+        self.assertEqual(strategy, "pass_ahead")
+        self.assertLess(side, 0.0)
+
     def test_track_regularize_velocity_keeps_raw_ekf_velocity_before_stable(self):
         controller = LaptopController.__new__(LaptopController)
         controller.obstacle_ekf_initial_velocity_std_m_s = 1.0

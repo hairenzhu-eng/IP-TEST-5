@@ -2561,6 +2561,40 @@ class LaptopController:
         # the side the obstacle came from, opposite to its lateral velocity.
         return -float(np.sign(lateral_speed))
 
+    def apf_obstacle_endpoint_direction_body(self, obs_pos_body, obs_vel_body, obstacle, along_sign):
+        obs_pos_body = np.asarray(obs_pos_body, dtype=float).reshape(2)
+        obs_vel_body = np.asarray(obs_vel_body, dtype=float).reshape(2)
+        if not np.isfinite(obs_pos_body).all() or not np.isfinite(obs_vel_body).all():
+            return np.zeros(2, dtype=float)
+
+        obs_speed = float(np.linalg.norm(obs_vel_body))
+        if obs_speed < self.apf_dynamic_speed_threshold_m_s:
+            return np.zeros(2, dtype=float)
+
+        axis_body = obs_vel_body / max(obs_speed, 1e-6)
+        pc1_m, _ = self.obstacle_pc_dimensions(obstacle)
+        endpoint_body = obs_pos_body + float(along_sign) * 0.5 * pc1_m * axis_body
+        endpoint_distance = float(np.linalg.norm(endpoint_body))
+        if endpoint_distance < 1e-6:
+            return float(along_sign) * axis_body
+        return endpoint_body / endpoint_distance
+
+    def apf_stern_direction_body(self, obs_pos_body, obs_vel_body, obstacle):
+        return self.apf_obstacle_endpoint_direction_body(
+            obs_pos_body,
+            obs_vel_body,
+            obstacle,
+            -1.0,
+        )
+
+    def apf_bow_direction_body(self, obs_pos_body, obs_vel_body, obstacle):
+        return self.apf_obstacle_endpoint_direction_body(
+            obs_pos_body,
+            obs_vel_body,
+            obstacle,
+            1.0,
+        )
+
     def apf_crossing_strategy_from_velocity(self, obs_vel_body):
         obs_vel_body = np.asarray(obs_vel_body, dtype=float).reshape(2)
         if not np.isfinite(obs_vel_body).all():
@@ -2573,7 +2607,7 @@ class LaptopController:
         if abs(lateral_speed) < self.apf_dynamic_speed_threshold_m_s:
             return "none", 0.0
 
-        if lateral_speed < 0.0:
+        if lateral_speed > 0.0:
             return "pass_astern", self.apf_pass_astern_side_from_velocity(obs_vel_body)
 
         return "pass_ahead", float(np.sign(lateral_speed))
@@ -3187,7 +3221,13 @@ class LaptopController:
             if pass_astern_active:
                 obs_speed = float(np.linalg.norm(obs_vel_body))
                 if obs_speed >= self.apf_dynamic_speed_threshold_m_s:
-                    astern_dir = -obs_vel_body / max(obs_speed, 1e-6)
+                    astern_dir = self.apf_stern_direction_body(
+                        obs_pos_body,
+                        obs_vel_body,
+                        obstacle,
+                    )
+                    if float(np.linalg.norm(astern_dir)) < 1e-6:
+                        astern_dir = -obs_vel_body / max(obs_speed, 1e-6)
                     astern_gain = self.apf_pass_astern_gain
                     if isinstance(encounter, str) and encounter.startswith("crossing"):
                         astern_gain *= float(getattr(self, "apf_crossing_repulsive_gain_scale", 2.5))
@@ -3200,7 +3240,13 @@ class LaptopController:
             if pass_ahead_active:
                 obs_speed = float(np.linalg.norm(obs_vel_body))
                 if obs_speed >= self.apf_dynamic_speed_threshold_m_s:
-                    ahead_dir = obs_vel_body / max(obs_speed, 1e-6)
+                    ahead_dir = self.apf_bow_direction_body(
+                        obs_pos_body,
+                        obs_vel_body,
+                        obstacle,
+                    )
+                    if float(np.linalg.norm(ahead_dir)) < 1e-6:
+                        ahead_dir = obs_vel_body / max(obs_speed, 1e-6)
                     ahead_gain = self.apf_pass_ahead_gain
                     if isinstance(encounter, str) and encounter.startswith("crossing"):
                         ahead_gain *= float(getattr(self, "apf_crossing_repulsive_gain_scale", 2.5))

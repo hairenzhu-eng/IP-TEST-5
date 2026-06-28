@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -17,6 +19,51 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
 DEFAULT_OUTPUT_DIR = DEFAULT_LOGS_DIR / "generated_figures"
+DEFAULT_DISTANCE_OUTPUT_DIR = DEFAULT_OUTPUT_DIR / "webots_distance_groups"
+
+TIME_COLUMNS = ("TimeFromStart(s)", "TimeFromStart", "elapsed [s]")
+OWN_NORTH_COLUMNS = ("North(m)", "North", "x [m]")
+OWN_EAST_COLUMNS = ("East(m)", "East", "y [m]")
+OBSTACLE_NORTH_COLUMNS = ("NearestObstacleNorth(m)", "NearestObstacleNorth")
+OBSTACLE_EAST_COLUMNS = ("NearestObstacleEast(m)", "NearestObstacleEast")
+OBSTACLE_DISTANCE_COLUMNS = ("NearestObstacleDistance(m)", "NearestObstacleDistance")
+
+SWITCH_LABELS = {
+    "ekf_on_cluster_on": "EKF on, size on",
+    "ekf_on_cluster_off": "EKF on, size off",
+    "ekf_off_cluster_on": "EKF off, size on",
+    "ekf_off_cluster_off": "EKF off, size off",
+}
+
+SWITCH_STYLES = {
+    "ekf_on_cluster_on": {"color": "#1f77b4", "linestyle": "-"},
+    "ekf_on_cluster_off": {"color": "#ff7f0e", "linestyle": "--"},
+    "ekf_off_cluster_on": {"color": "#2ca02c", "linestyle": "-."},
+    "ekf_off_cluster_off": {"color": "#d62728", "linestyle": ":"},
+}
+
+
+@dataclass
+class DistanceRun:
+    run_dir: Path
+    webots_environment: str
+    switch_combination: str
+    time_s: np.ndarray
+    distance_m: np.ndarray
+    collision_time_s: np.ndarray
+    collision_boundary_m: np.ndarray
+
+    @property
+    def minimum_clearance_m(self):
+        boundary = np.interp(
+            self.time_s,
+            self.collision_time_s,
+            self.collision_boundary_m,
+            left=np.nan,
+            right=np.nan,
+        )
+        clearance = self.distance_m - boundary
+        return float(np.nanmin(clearance))
 
 
 def positive_float(value):
@@ -25,6 +72,186 @@ def positive_float(value):
     except (TypeError, ValueError):
         return None
     return value if np.isfinite(value) and value > 0.0 else None
+
+
+def parse_float(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return value if np.isfinite(value) else np.nan
+
+
+def parse_bool(value):
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return None
+
+
+def first_existing(row, names):
+    for name in names:
+        if name in row:
+            return row[name]
+    return None
+
+
+def normalise_webots_name(value):
+    text = str(value or "").strip()
+    if text.lower().endswith(".wbt"):
+        text = Path(text).stem
+    text = text.lower().replace("-", "_").replace(" ", "_")
+    token = "".join(char for char in text if char.isalnum() or char == "_")
+    return token or "webots_unknown"
+
+
+def switch_from_flags(ekf_enabled, size_enabled):
+    if ekf_enabled is None or size_enabled is None:
+        return None
+    return (
+        f"ekf_{'on' if ekf_enabled else 'off'}_"
+        f"cluster_{'on' if size_enabled else 'off'}"
+    )
+
+
+def find_primary_csv(run_dir):
+    candidates = [
+        path
+        for path in Path(run_dir).glob("log_*.csv")
+        if not path.name.endswith("_pseudo_aruco.csv")
+    ]
+    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
+
+
+def read_log_metadata(log_path):
+    with log_path.open(newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames is None:
+            raise ValueError("CSV file has no header")
+        for row in reader:
+            webots_environment = normalise_webots_name(row.get("WebotsEnvironment"))
+            switch_combination = str(row.get("SwitchCombination", "")).strip()
+            if switch_combination not in SWITCH_LABELS:
+                switch_combination = switch_from_flags(
+                    parse_bool(row.get("EKFPredictionEnabled")),
+                    parse_bool(row.get("ClusterSizeAPFEnabled")),
+                )
+            if (
+                webots_environment not in {"webots_unknown", "not_webots"}
+                and switch_combination in SWITCH_LABELS
+            ):
+                return webots_environment, switch_combination
+    raise ValueError("No Webots/EKF/size metadata in CSV")
+
+
+def read_distance_series(log_path):
+    times = []
+    distances = []
+    first_time_s = np.nan
+
+    with log_path.open(newline="", encoding="utf-8-sig") as stream:
+        reader = csv.DictReader(stream)
+        if reader.fieldnames is None:
+            raise ValueError("CSV file has no header")
+
+        for row in reader:
+            time_s = parse_float(first_existing(row, TIME_COLUMNS))
+            if np.isfinite(time_s) and not np.isfinite(first_time_s):
+                first_time_s = time_s
+            distance_m = parse_float(first_existing(row, OBSTACLE_DISTANCE_COLUMNS))
+
+            if not np.isfinite(distance_m):
+                own_north = parse_float(first_existing(row, OWN_NORTH_COLUMNS))
+                own_east = parse_float(first_existing(row, OWN_EAST_COLUMNS))
+                obstacle_north = parse_float(first_existing(row, OBSTACLE_NORTH_COLUMNS))
+                obstacle_east = parse_float(first_existing(row, OBSTACLE_EAST_COLUMNS))
+                if all(
+                    np.isfinite(value)
+                    for value in (own_north, own_east, obstacle_north, obstacle_east)
+                ):
+                    distance_m = float(
+                        np.hypot(own_north - obstacle_north, own_east - obstacle_east)
+                    )
+
+            if np.isfinite(time_s) and np.isfinite(distance_m):
+                times.append(float(time_s))
+                distances.append(float(distance_m))
+
+    if not times:
+        raise ValueError("No valid nearest-obstacle distance samples")
+
+    time_array = np.asarray(times, dtype=float)
+    distance_array = np.asarray(distances, dtype=float)
+    order = np.argsort(time_array)
+    time_array = time_array[order]
+    distance_array = distance_array[order]
+    time_array -= float(first_time_s) if np.isfinite(first_time_s) else time_array[0]
+    return time_array, distance_array, float(first_time_s)
+
+
+def read_collision_boundary_series(run_dir, first_log_time_s):
+    times = []
+    boundaries = []
+    own_radius_m = np.nan
+
+    for path in sorted(Path(run_dir).glob("obstacle_*.json")):
+        try:
+            with path.open(encoding="utf-8") as stream:
+                payload = json.load(stream)
+        except (OSError, json.JSONDecodeError):
+            continue
+
+        settings = payload.get("apf_settings", {})
+        if isinstance(settings, dict):
+            radius = parse_float(settings.get("own_equivalent_radius_m"))
+            if np.isfinite(radius) and radius > 0.0:
+                if np.isfinite(own_radius_m) and not np.isclose(own_radius_m, radius):
+                    raise ValueError("Own-ship radius changes within the run")
+                own_radius_m = radius
+
+        time_s = parse_float(payload.get("t"))
+        robot_pos = np.asarray(payload.get("robot_pos", [np.nan, np.nan]), dtype=float)
+        clusters = payload.get("clusters", [])
+        if (
+            not np.isfinite(time_s)
+            or not np.isfinite(own_radius_m)
+            or robot_pos.size < 2
+            or not np.isfinite(robot_pos[:2]).all()
+            or not isinstance(clusters, list)
+        ):
+            continue
+
+        candidates = []
+        for cluster in clusters:
+            if not isinstance(cluster, dict):
+                continue
+            centre = np.asarray(cluster.get("centre_ne", [np.nan, np.nan]), dtype=float)
+            obstacle_radius_m = parse_float(cluster.get("equivalent_radius_m"))
+            if (
+                centre.size < 2
+                or not np.isfinite(centre[:2]).all()
+                or not np.isfinite(obstacle_radius_m)
+                or obstacle_radius_m <= 0.0
+            ):
+                continue
+            centre_distance_m = float(np.linalg.norm(robot_pos[:2] - centre[:2]))
+            boundary_m = float(own_radius_m + obstacle_radius_m)
+            candidates.append((centre_distance_m - boundary_m, centre_distance_m, boundary_m))
+
+        if candidates:
+            _, _, boundary_m = min(candidates, key=lambda item: item[0])
+            times.append(float(time_s) - first_log_time_s)
+            boundaries.append(boundary_m)
+
+    if not times:
+        raise ValueError("No valid collision-boundary samples")
+
+    time_array = np.asarray(times, dtype=float)
+    boundary_array = np.asarray(boundaries, dtype=float)
+    order = np.argsort(time_array)
+    return time_array[order], boundary_array[order]
 
 
 def load_cluster_dimensions(run_dir):
@@ -155,17 +382,130 @@ def plot_cluster_dimensions(run_dir, output_path=None):
     return output_path, pc1_mean_m, pc2_mean_m, len(all_samples)
 
 
-def latest_run_dir(logs_dir):
-    candidates = [
-        path
-        for path in Path(logs_dir).glob("run_*")
-        if path.is_dir() and any(path.glob("obstacle_*.json"))
-    ]
-    if not candidates:
-        raise FileNotFoundError(
-            f"No run directory with obstacle JSON logs in {logs_dir}"
+def load_distance_run(run_dir):
+    log_path = find_primary_csv(run_dir)
+    if log_path is None:
+        raise FileNotFoundError("No primary log_*.csv file")
+    webots_environment, switch_combination = read_log_metadata(log_path)
+    time_s, distance_m, first_log_time_s = read_distance_series(log_path)
+    collision_time_s, collision_boundary_m = read_collision_boundary_series(
+        run_dir,
+        first_log_time_s,
+    )
+    return DistanceRun(
+        run_dir=Path(run_dir),
+        webots_environment=webots_environment,
+        switch_combination=switch_combination,
+        time_s=time_s,
+        distance_m=distance_m,
+        collision_time_s=collision_time_s,
+        collision_boundary_m=collision_boundary_m,
+    )
+
+
+def scan_distance_runs(logs_dir):
+    records = []
+    skipped = []
+    for run_dir in sorted(Path(logs_dir).glob("run_*"), key=lambda path: path.name, reverse=True):
+        if not run_dir.is_dir():
+            continue
+        try:
+            records.append(load_distance_run(run_dir))
+        except (FileNotFoundError, ValueError) as exc:
+            skipped.append((run_dir, str(exc)))
+    return records, skipped
+
+
+def latest_by_webots_and_switch(records):
+    grouped = defaultdict(dict)
+    for record in sorted(records, key=lambda item: item.run_dir.name, reverse=True):
+        grouped[record.webots_environment].setdefault(record.switch_combination, record)
+    return {
+        webots_environment: group
+        for webots_environment, group in grouped.items()
+        if len(group) >= 2
+    }
+
+
+def safe_output_name(name):
+    return "".join(char if char.isalnum() or char in "._-" else "_" for char in name)
+
+
+def plot_webots_distance_group(webots_environment, group, output_dir):
+    output_path = Path(output_dir) / f"{safe_output_name(webots_environment)}_distance.png"
+    fig, ax = plt.subplots(figsize=(10, 5.8))
+
+    for switch in SWITCH_LABELS:
+        record = group.get(switch)
+        if record is None:
+            continue
+        style = SWITCH_STYLES[switch]
+        label = (
+            f"{SWITCH_LABELS[switch]} {record.run_dir.name} "
+            f"(min clearance {record.minimum_clearance_m:.2f} m)"
         )
-    return max(candidates, key=lambda path: path.stat().st_mtime)
+        ax.plot(
+            record.time_s,
+            record.distance_m,
+            linewidth=2.0,
+            label=label,
+            **style,
+        )
+        ax.plot(
+            record.collision_time_s,
+            record.collision_boundary_m,
+            color=style["color"],
+            linestyle=":",
+            linewidth=1.1,
+            alpha=0.8,
+            label=f"{SWITCH_LABELS[switch]} collision boundary",
+        )
+
+    ax.set_title(
+        "Distance to nearest obstacle\n"
+        f"{webots_environment.replace('_', ' ').title()}"
+    )
+    ax.set_xlabel("Time from log start (s)")
+    ax.set_ylabel("Distance (m)")
+    ax.set_xlim(left=0.0)
+    ax.set_ylim(bottom=0.0)
+    ax.grid(True, linestyle=":", alpha=0.35)
+    ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+    return output_path
+
+
+def plot_webots_distance_groups(logs_dir, output_dir):
+    records, skipped = scan_distance_runs(logs_dir)
+    grouped = latest_by_webots_and_switch(records)
+    if not grouped:
+        raise ValueError("No Webots groups with at least two EKF/size states found")
+
+    outputs = []
+    for webots_environment, group in sorted(grouped.items()):
+        outputs.append((plot_webots_distance_group(webots_environment, group, output_dir), group))
+    return outputs, skipped
+
+
+def plot_webots_distance_group_for_run(run_dir, logs_dir, output_dir):
+    selected = load_distance_run(Path(run_dir))
+    records, skipped = scan_distance_runs(logs_dir)
+    group = {}
+    for record in sorted(records + [selected], key=lambda item: item.run_dir.name, reverse=True):
+        if record.webots_environment == selected.webots_environment:
+            group.setdefault(record.switch_combination, record)
+    if not group:
+        raise ValueError(f"No runs found for Webots environment {selected.webots_environment}")
+    output_path = plot_webots_distance_group(
+        selected.webots_environment,
+        group,
+        output_dir,
+    )
+    return output_path, group, skipped
 
 
 def main():
@@ -178,21 +518,67 @@ def main():
     parser.add_argument(
         "--run-dir",
         type=Path,
-        help="Run directory containing obstacle_*.json; defaults to latest run.",
+        help="Run directory used to select one Webots distance group.",
     )
     parser.add_argument("--logs-dir", type=Path, default=DEFAULT_LOGS_DIR)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--pc-dimensions",
+        action="store_true",
+        help="Plot old PC1/PC2 dimensions for --run-dir instead of distances.",
+    )
+    parser.add_argument(
+        "--distance-output-dir",
+        type=Path,
+        default=DEFAULT_DISTANCE_OUTPUT_DIR,
+        help="Output directory for grouped Webots distance figures.",
+    )
     args = parser.parse_args()
 
-    run_dir = args.run_dir or latest_run_dir(args.logs_dir)
-    output_path, pc1_mean_m, pc2_mean_m, sample_count = (
-        plot_cluster_dimensions(run_dir, args.output)
+    if args.pc_dimensions:
+        if not args.run_dir:
+            raise SystemExit("--pc-dimensions requires --run-dir")
+        output_path, pc1_mean_m, pc2_mean_m, sample_count = (
+            plot_cluster_dimensions(args.run_dir, args.output)
+        )
+        print(f"Run: {args.run_dir}")
+        print(f"Samples: {sample_count}")
+        print(f"PC1 mean: {pc1_mean_m:.6f} m")
+        print(f"PC2 mean: {pc2_mean_m:.6f} m")
+        print(f"Figure: {output_path}")
+        return
+
+    if args.run_dir:
+        output_path, group, skipped = plot_webots_distance_group_for_run(
+            args.run_dir,
+            args.logs_dir,
+            args.distance_output_dir,
+        )
+        print(f"Figure: {output_path}")
+        for switch in SWITCH_LABELS:
+            record = group.get(switch)
+            if record is not None:
+                print(
+                    f"  {SWITCH_LABELS[switch]}: {record.run_dir.name}, "
+                    f"min clearance={record.minimum_clearance_m:.3f} m"
+                )
+        print(f"Skipped {len(skipped)} unclassifiable runs.")
+        return
+
+    outputs, skipped = plot_webots_distance_groups(
+        args.logs_dir,
+        args.distance_output_dir,
     )
-    print(f"Run: {run_dir}")
-    print(f"Samples: {sample_count}")
-    print(f"PC1 mean: {pc1_mean_m:.6f} m")
-    print(f"PC2 mean: {pc2_mean_m:.6f} m")
-    print(f"Figure: {output_path}")
+    for output_path, group in outputs:
+        print(f"Figure: {output_path}")
+        for switch in SWITCH_LABELS:
+            record = group.get(switch)
+            if record is not None:
+                print(
+                    f"  {SWITCH_LABELS[switch]}: {record.run_dir.name}, "
+                    f"min clearance={record.minimum_clearance_m:.3f} m"
+                )
+    print(f"Skipped {len(skipped)} unclassifiable runs.")
 
 
 if __name__ == "__main__":
