@@ -136,6 +136,41 @@ class LaptopStrategyDispatchTest(unittest.TestCase):
         )
         self.assertEqual(speed, 0.85)
 
+    def test_overtaking_speed_command_beats_obstacle_deadline_without_cap(self):
+        controller = laptop.LaptopController.__new__(laptop.LaptopController)
+        controller.overtaking_min_speed_m_s = 1.0
+        controller.overtaking_speed_margin_m_s = 0.2
+        controller.overtaking_deadline_safety_factor = 1.25
+        controller.overtaking_obstacle_endpoint_progress_m = 10.0
+        controller.overtaking_pass_clearance_m = 1.0
+        controller.detected_obstacle_speed_m_s = 0.8
+        controller.detected_obstacle_progress_m = 2.0
+        controller.North = 0.0
+        controller.East = 1.0
+        controller.start_ne = laptop.np.array([0.0, 1.0])
+        controller.route_path_unit_ne = laptop.np.array([1.0, 0.0])
+        controller.lastdt = 0.2
+        controller.apf_overtaking_params = {}
+
+        controller._update_overtaking_speed_command()
+
+        self.assertTrue(laptop.np.isinf(controller.v_max))
+        self.assertGreater(controller.route_tracking_speed_m_s, 0.8)
+        self.assertEqual(
+            controller.apf_overtaking_params["constant_descent_speed_m_s"],
+            controller.route_tracking_speed_m_s,
+        )
+
+    def test_unbounded_propeller_calibration_round_trip(self):
+        force_n = 20.0
+        rpm = laptop._overtaking.force_to_rpm_unbounded(force_n)
+        self.assertGreater(rpm, 2000.0)
+        self.assertAlmostEqual(
+            laptop._overtaking.rpm2N(rpm, None, None),
+            force_n,
+            places=6,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -756,6 +756,7 @@ class WebotsController(Supervisor):
             },
         }
         custom_data = self.getCustomData()
+        self.unbounded_ego_thrust = custom_data.startswith("front_obstacle_speed=")
         if custom_data.startswith("front_obstacle_speed="):
             front_obstacle_speed = self._positive_float(custom_data.partition("=")[2])
             if front_obstacle_speed is not None:
@@ -790,6 +791,7 @@ class WebotsController(Supervisor):
         head_on_obstacle_node = self.getFromDef("HEAD_ON_OBSTACLE_ROBOT")
         static_path_obstacle_node = self.getFromDef("STATIC_PATH_OBSTACLE_ROBOT")
         if front_obstacle_node is not None:
+            self.unbounded_ego_thrust = True
             target = self._make_motion_target(
                 "FRONT_OBSTACLE_ROBOT",
                 front_obstacle_node,
@@ -1125,8 +1127,9 @@ class WebotsController(Supervisor):
 
     def rpm2N(self, x, fwd_lim = 2000, rev_lim = -2000): 
         tol = 10                
-        if x>fwd_lim: x=fwd_lim
-        if x<rev_lim: x=rev_lim
+        if not getattr(self, "unbounded_ego_thrust", False):
+            if x>fwd_lim: x=fwd_lim
+            if x<rev_lim: x=rev_lim
         if abs(x) <= tol: return 0
         elif x>tol: return 1.542E-7*x**2+0.0003293*x-0.001401
         else: return -7.357E-8*x**2+0.0001717*x-1.054E-16

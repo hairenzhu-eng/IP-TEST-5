@@ -70,8 +70,8 @@ def Vector(dim): return np.zeros((dim, 1), dtype=float)
 
 def rpm2N(x, fwd_lim = 2000, rev_lim = -2000): 
     tol = 10
-    if x>fwd_lim: x=fwd_lim
-    if x<rev_lim: x=rev_lim
+    if fwd_lim is not None and x>fwd_lim: x=fwd_lim
+    if rev_lim is not None and x<rev_lim: x=rev_lim
     if abs(x) <= tol: return 0
     elif x>tol: return 1.541571428571430076E-7*x**2+3.293357142857142252E-4*x-1.401428571428424679E-3
     else: return -7.35749999999999954E-8*x**2+1.716749999999999581E-4*x-1.054478382732365536E-16
@@ -83,6 +83,35 @@ def N2rpm(x, fwd_lim = 1.2753, rev_lim = -0.63765):
     if abs(x) <= tol: return 0
     elif x>tol: return -5.727416623043567370E2*x**2+2.268233085499708977E3*x+2.958718669408357371E1
     else: return 2.397948698765131667E3*x**2+4.665568885752373717E3*x - -6.685183692128883879E-14
+
+def force_to_rpm_unbounded(force_n):
+    """Invert the propeller calibration without its fitted-range clamp."""
+    force_n = float(force_n)
+    if abs(force_n) <= 1e-3:
+        return 0.0
+
+    if force_n > 0.0:
+        a, b, c = (
+            1.541571428571430076E-7,
+            3.293357142857142252E-4,
+            -1.401428571428424679E-3,
+        )
+    else:
+        a, b, c = (
+            -7.35749999999999954E-8,
+            1.716749999999999581E-4,
+            -1.054478382732365536E-16,
+        )
+
+    discriminant = b * b - 4.0 * a * (c - force_n)
+    if discriminant < 0.0:
+        return 0.0
+    roots = (
+        (-b + np.sqrt(discriminant)) / (2.0 * a),
+        (-b - np.sqrt(discriminant)) / (2.0 * a),
+    )
+    matching_roots = [root for root in roots if np.sign(root) == np.sign(force_n)]
+    return float(min(matching_roots, key=abs)) if matching_roots else 0.0
 
 # Keep heading errors continuous for route tracking.
 def wrap_angle(a):
@@ -3597,6 +3626,9 @@ class LaptopController:
        return predicted_state, F
 
     def thruster_force_limits(self):
+        if self.unbounded_overtaking_speed_enabled():
+            return -np.inf, np.inf
+
         max_rpm = self.prop_rate_limit_rad_s * 60.0 / (2.0 * np.pi)
         forward_force = float(rpm2N(max_rpm))
         reverse_force = float(rpm2N(-max_rpm))
@@ -3608,6 +3640,12 @@ class LaptopController:
             reverse_force = -0.5 * forward_force
 
         return reverse_force, forward_force
+
+    def unbounded_overtaking_speed_enabled(self):
+        return (
+            self.OPERATING_MODE == 2
+            and "overtaking" in str(getattr(self, "webots_environment", "")).lower()
+        )
 
     def allocate_propulsion_rates(self, v_cmd, w_cmd):
         v_cmd = float(v_cmd) if np.isfinite(v_cmd) else 0.0
@@ -3650,11 +3688,16 @@ class LaptopController:
             right_force = float(np.clip(right_force, reverse_force, forward_force))
             left_force = float(np.clip(left_force, reverse_force, forward_force))
 
-        rpm_R = -N2rpm(right_force)
-        rpm_L = N2rpm(left_force)
-
-        right_rate = float(np.clip(rpm_R * (2.0 * np.pi / 60.0), -self.prop_rate_limit_rad_s, self.prop_rate_limit_rad_s))
-        left_rate = float(np.clip(rpm_L * (2.0 * np.pi / 60.0), -self.prop_rate_limit_rad_s, self.prop_rate_limit_rad_s))
+        if self.unbounded_overtaking_speed_enabled():
+            rpm_R = -force_to_rpm_unbounded(right_force)
+            rpm_L = force_to_rpm_unbounded(left_force)
+            right_rate = float(rpm_R * (2.0 * np.pi / 60.0))
+            left_rate = float(rpm_L * (2.0 * np.pi / 60.0))
+        else:
+            rpm_R = -N2rpm(right_force)
+            rpm_L = N2rpm(left_force)
+            right_rate = float(np.clip(rpm_R * (2.0 * np.pi / 60.0), -self.prop_rate_limit_rad_s, self.prop_rate_limit_rad_s))
+            left_rate = float(np.clip(rpm_L * (2.0 * np.pi / 60.0), -self.prop_rate_limit_rad_s, self.prop_rate_limit_rad_s))
         return right_rate, left_rate
 
     def empty_measurement(x):
@@ -3744,8 +3787,18 @@ class LaptopController:
 
         if self.sensed_imu_stamp_s is not None or self.OPERATING_MODE == 2:
             ### EKF PREDICT/UPDATE ##############################
-            right_N = rpm2N(-self.right_rate * 60 / (2 * np.pi))
-            left_N = rpm2N(self.left_rate * 60 / (2 * np.pi))
+            rpm_limit = None if self.unbounded_overtaking_speed_enabled() else 2000
+            reverse_rpm_limit = None if rpm_limit is None else -rpm_limit
+            right_N = rpm2N(
+                -self.right_rate * 60 / (2 * np.pi),
+                rpm_limit,
+                reverse_rpm_limit,
+            )
+            left_N = rpm2N(
+                self.left_rate * 60 / (2 * np.pi),
+                rpm_limit,
+                reverse_rpm_limit,
+            )
             u_thrusters = l2m([right_N, left_N])
             self.mu, self.Sigma = extended_kalman_filter_predict(
                 self.mu,
