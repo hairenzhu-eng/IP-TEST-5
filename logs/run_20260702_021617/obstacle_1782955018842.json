@@ -1,0 +1,205 @@
+{
+  "t": 41.743019104003906,
+  "timestamp_s": 1782955018.8419948,
+  "robot_pos": [
+    5.44249734772991,
+    1.353509327703275
+  ],
+  "robot_yaw_rad": 0.1799343984443001,
+  "cloud": [
+    [
+      9.323737601564817,
+      0.8551618835478814
+    ],
+    [
+      9.32054003436667,
+      0.9008249225810336
+    ],
+    [
+      9.31906368393935,
+      0.9460976881013985
+    ],
+    [
+      9.317693241566284,
+      0.9912110120951112
+    ],
+    [
+      9.316421885371819,
+      1.036181897266566
+    ],
+    [
+      9.330161758027396,
+      1.079925521014673
+    ],
+    [
+      9.329101536012333,
+      1.1248330060882599
+    ],
+    [
+      9.32812769505112,
+      1.169646479966128
+    ],
+    [
+      9.327236396318062,
+      1.2143813925436828
+    ],
+    [
+      9.326422897779565,
+      1.2590529746744616
+    ],
+    [
+      10.232655909042702,
+      1.289604976148693
+    ]
+  ],
+  "clusters": [
+    {
+      "label": 0,
+      "point_count": 10,
+      "centre_body": [
+        3.810988674509244,
+        -0.9946123277257006
+      ],
+      "centre_ne": [
+        9.323850672999741,
+        1.0577316777879193
+      ],
+      "distance_m": 3.938640420208687,
+      "angle_rad": -0.25529082306859885,
+      "angle_deg": -14.62708671025175,
+      "min_distance_m": 3.9316629340346902,
+      "cluster_radius_m": 0.20256982579742924,
+      "cluster_size_m": 0.40390001771129014,
+      "length_axis_body": [
+        0.20302594081530387,
+        0.9791733591944077
+      ],
+      "length_axis_ne": [
+        0.02215124186237133,
+        0.9997546311390384
+      ],
+      "equivalent_radius_m": 0.20192573573776146,
+      "measurement_covariance": [
+        [
+          0.0064403127283891946,
+          0.0005512733346408542
+        ],
+        [
+          0.0005512733346408542,
+          0.013938618734808972
+        ]
+      ]
+    }
+  ],
+  "tracks": [],
+  "virtual_obstacles": [],
+  "apf": {
+    "navigation_mode": "apf_colreg",
+    "encounter": "overtaking",
+    "active_profile": "overtaking",
+    "colreg_rule": "none",
+    "side": -1.0,
+    "dcpa_m": null,
+    "tcpa_s": null,
+    "force_body": [
+      15.115010450601254,
+      0.034213101697171844
+    ],
+    "repulsive_force_body": [
+      -0.0007055169121531232,
+      -0.0011464038254852364
+    ],
+    "attractive_force_body": [
+      15.115715967513408,
+      0.03535950552265721
+    ],
+    "target_ne": [
+      7.54249734772991,
+      6.0
+    ],
+    "selected_controller": "overtaking",
+    "colreg_active": true
+  },
+  "apf_settings": {
+    "own_equivalent_radius_m": 0.3,
+    "collision_horizon_s": 10.0,
+    "prediction_dt_s": 0.5,
+    "constant_descent_speed_m_s": 1.0,
+    "obstacle_ekf_prediction_enabled": false,
+    "obstacle_prediction_horizon_s": 15.0,
+    "obstacle_prediction_step_s": 0.5,
+    "dynamic_speed_enter_m_s": 0.06,
+    "dynamic_speed_exit_m_s": 0.04,
+    "prediction_min_samples": 3,
+    "prediction_min_time_span_s": 0.8,
+    "prediction_max_speed_std_m_s": 0.1,
+    "prediction_max_heading_var_rad2": 0.373156339238718,
+    "cluster_range_enabled": false,
+    "classic_influence_distance_m": 5.0,
+    "risk_pc_scale": 15.0,
+    "avoidance_pc_scale": 20.0,
+    "direction_pc_scale": 30.0,
+    "virtual_pc_scale": 30.0,
+    "crossing_profile": {
+      "cluster_range_enabled": false,
+      "classic_influence_distance_m": 5.0,
+      "risk_pc_scale": 15.0,
+      "avoidance_pc_scale": 20.0,
+      "direction_pc_scale": 30.0,
+      "virtual_pc_scale": 30.0,
+      "repulsive_gain": 0.08,
+      "dynamic_repulsive_gain": 0.1,
+      "colreg_side_gain": 2.4,
+      "route_lookahead_m": 2.1,
+      "collision_horizon_s": 10.0,
+      "constant_descent_speed_m_s": 0.85,
+      "pass_astern_gain": 2.2,
+      "dynamic_speed_threshold_m_s": 0.06
+    },
+    "overtaking_profile": {
+      "cluster_range_enabled": false,
+      "classic_influence_distance_m": 5.0,
+      "risk_pc_scale": 15.0,
+      "avoidance_pc_scale": 50.0,
+      "direction_pc_scale": 60.0,
+      "virtual_pc_scale": 30.0,
+      "repulsive_gain": 0.08,
+      "dynamic_repulsive_gain": 0.1,
+      "colreg_side_gain": 2.4,
+      "route_lookahead_m": 2.1,
+      "collision_horizon_s": 10.0,
+      "constant_descent_speed_m_s": 1.0,
+      "pass_astern_gain": 2.2,
+      "dynamic_speed_threshold_m_s": 0.06
+    },
+    "head_on_profile": {
+      "cluster_range_enabled": false,
+      "classic_influence_distance_m": 5.0,
+      "risk_pc_scale": 15.0,
+      "avoidance_pc_scale": 20.0,
+      "direction_pc_scale": 30.0,
+      "virtual_pc_scale": 30.0,
+      "repulsive_gain": 0.08,
+      "dynamic_repulsive_gain": 0.1,
+      "colreg_side_gain": 2.4,
+      "route_lookahead_m": 2.1,
+      "collision_horizon_s": 10.0,
+      "constant_descent_speed_m_s": 0.85,
+      "pass_astern_gain": 2.2,
+      "dynamic_speed_threshold_m_s": 0.06
+    },
+    "minimum_pc1_m": 0.36,
+    "minimum_pc2_m": 0.2
+  },
+  "dbscan": {
+    "eps_m": 0.2,
+    "min_samples": 3
+  },
+  "run_context": {
+    "webots_environment": "mr_webots_overtaking_large_ship_0_6_m_s.wbt",
+    "switch_combination": "ekf_off_cluster_off",
+    "ekf_prediction_enabled": false,
+    "cluster_size_apf_enabled": false,
+    "classic_apf_influence_distance_m": 5.0
+  }
+}

@@ -1,0 +1,558 @@
+
+
+===== PAGE 1 =====
+
+MSc project Scoping study  
+Name: Yida Zhu 
+ID number: 33393559 
+Date: 21/04/2026 
+Developing COLREG compliant Autonomous Surface Vessel Navigation 
+using Behavioural Trees for busy water ways 
+Summary  
+Maritime autonomy is becoming increasingly prevalent in maritime environments. How to 
+navigate in increasingly crowded waterways with variable traffic and rules, is a challenge of 
+utmost importance for navigation systems. This dissertation builds on the ba ckground of this 
+problem. Autonomous Surface Vessels (ASVs) must detect and avoid static and dynamic hazards 
+and follow the rule set for the interaction of vessels at sea, the International Regulations for the 
+Prevention of Collisions at Sea (COLREGs). 
+revious work in the area has examined rule -based COLREGs compliance and several types of 
+obstacle avoidance, but has a remaining issue. Reactive systems suffer in dynamic scenarios, 
+and planning systems fall short in real -time requirements. This dissertati on builds on this 
+problem. 
+The framework proposed in this dissertation uses Behavior Trees as the primary decision-making 
+system due to their clarity and suitability for maritime scenarios. Perception relies on LiDAR, to 
+detect and track vessels around the ASV as conditions change. Motion planning is implemented 
+through a combination of Artificial Potential Field (APF) methods for reactive responses to local 
+threats, and Gaussian Process Motion Planning 2 (GPMP2) for smoother and globally planned 
+paths. 
+Testing will be performed on a simulated multi-vessel environment in Webots reflecting common 
+COLREGs encounter types. Additionally, the project involves performing tests on a physical 
+platform to observe real-world system performance. 
+Contents Table 
+MSc project Scoping study ..................................................................................................... 1 
+Summary ........................................................................................................................... 1 
+Contents Table ................................................................................................................... 1 
+Introduction ....................................................................................................................... 2 
+Project aims and objectives. ............................................................................................... 2 
+Background and Literature review ....................................................................................... 3 
+Methodology / Planned work ............................................................................................... 5 
+Environmental and societal impact [~200 words] ................................................................. 5 
+Gannt Chart ....................................................................................................................... 6 
+
+===== PAGE 2 =====
+
+References ......................................................................................................................... 7 
+Appendix A Risk Assessments ............................................................................................. 9 
+Appendix B GenAI (form signed by student) ....................................................................... 10 
+ 
+Introduction 
+Autonomous Surface Vessels (ASVs) have transitioned from theoretical concepts to real -world 
+deployment in an increasing number of maritime application domains such as environmental 
+monitoring, harbor surveillance, offshore inspection, and more recently car go transport. (Bae 
+and Hong, 2023) Across these challenging environments, such as ports, harbors and congested 
+coastal waterway. These man-made waterways present a dense traffic of vessels of varying sizes 
+within constantly changing configurations of obstacles, which provides a unique environment for 
+experienced human seafarers. (Hu et al., 2022) Adding static infrastructure and navigation 
+boundaries, and considering requirements of compliance with the International Regulations for 
+Preventing Collisions at Sea (COLREGs), the challenge and lack of margin for error in autonomous 
+navigation are significant. Traditionally, marine navigation has depended on pre -defined routes, 
+waypoint following, or simple reactive avoidance methods. (Xu and Guedes Soares, 2023) While 
+these approaches work well in environments where conditions change slowly and the chance of 
+vessels interacting is low, they fail in scenarios where multiple vessels approach and depart from 
+one another over time and space, where maneuvering is constrained, and where timely decisions 
+must be made. (Burmeister and Constapel, 2021; Zhang et al., 2021) Navigation in these 
+environments cannot be reduced to solving a geometry problem, but rather requires interpreting 
+the behavior of surrounding vessels and predicting how it will evolve over time. (Li et al., 2024) 
+An autonomous navigation system for the sea must not only sense and react to risk of collision in 
+realtime, but do so in a way that other mariners can infer and anticipate. Safe motion at sea is 
+partly a physics problem, partly a social problem: it requires navigation conventions that produce 
+predictable, readable behavior. COLREGs encapsulate those conventions, and any truly 
+autonomous navigation system operating in mixed traffic streams alongside human -crewed 
+vessels will have to incorporate that regulato ry logic seamlessly with perception and planning. 
+Doing the real -time obstacle tracking, rule -based reasoning, and then motion planning in 
+between is not trivial. 
+A number of papers have looked at solutions to parts of this problem. Velocity -based collision 
+avoidance methods search velocity space for motion commands that are safe and dynamically 
+feasible given predicted future interactions. (Cho et al., 2019) Their real-time responsiveness 
+makes them particularly suitable for dynamic realtime deployment. (Cao et al., 2025) 
+Probabilistic trajectory optimization techniques have also been developed to produce globally 
+coherent smooth trajectories under uncertainty, taki ng into account the variations in sensor 
+measurements, vessel motion and environmental conditions. These are useful for navigation in 
+cluttered waterways with many possible interactions, when careful trade -offs between safety 
+and efficiency must be made. B oth these kinds of approaches tend to be restricted to local 
+planning and control, rather than the global high -level reasoning that true maritime navigation 
+requires. 
+ 
+
+===== PAGE 3 =====
+
+Behavior Trees (BTs) provide an attractive solution to this problem. Originaly designed as a 
+modular decision architecture for robotics and game AI, BTs hierarchically organize complex 
+behaviors as combinations of simpler tasks and conditions, which can be  composed, reused, 
+and tweaked without affecting the broader system. (Colledanchise and Ögren, 2018; Iovino et al., 
+2022) They also scale better than finite state machines as system complexity increases, because 
+new behavioral logic can be added without overhauling the entire decision architecture. In some 
+contexts, such as safety -critical systems, this transparency is more than just an engineering 
+convenience. Understanding the logic behind a vessel maneuver is vital for debugging, 
+verification, and ultimately, the creation of justified confidence in autonomous decision making. 
+(Merino-Fidalgo et al., 2025; Alamoush and Ölçer, 2025) 
+This work seeks to integrate the perception, planning, and decision-making capabilities of a route 
+navigation system, using BT as the coordinator of perception and planning capabilities. 
+Perception provides detection and tracking of nearby vessels, and sit uational awareness of the 
+surrounding environment and other hazards. Planning interprets this awareness to generate safe 
+and efficient motion trajectories. The behavior tree, on top of both, selects the appropriate 
+navigation action to take in a given encounter situation and according to the rule for compliance 
+with the COLREGs. 
+Project aims and objectives. 
+Aim: This project is aimed at developing and validating a behavior tree -based guidance and 
+navigation framework for small autonomous surface vessels, to enable safe, resilient and 
+COLREGs-compliant operation in settings with a high number of moving ships and obstacles. 
+Objective 1: The creation of a modular behavior-tree-based architecture to serve as the top-level 
+guidance and decision -making structure for autonomous surface vessels. The architecture 
+should be flexible enough to describe a range of navigational tasks an d to encode rule -based 
+behaviors in a formal, understandable manner. 
+Objective 2: The design of behavior tree -based navigation behaviors that comply with COLREGs 
+and allow the vessel to correctly determine right -of-way and execute appropriate collision -
+avoidance manoeuvres for a variety of multi-vessel encounter scenarios. 
+Objective 3: The integration of relevant Lidar data into the decision pipeline, to enable perception-
+based, uncertainty-informed navigation in complex, dynamic marine environments. 
+Objective 4: The development of a high -fidelity simulation environment in Webots, supporting 
+multiple moving vessels, realistic traffic flows and port -scale layouts, to provide a realistic 
+testbed for evaluating the proposed framework. 
+Objective 5: Performance assessment of the proposed solution for different traffic densities, 
+sensor availability and encounter configurations, to gain insight into the strengths and limitations 
+of the described behavior tree -based approach and to inform i ts future development and 
+application in autonomous vessel traffic management systems. 
+Background and Literature review 
+Autonomous navigation in maritime environment is an active research field, with many different 
+approaches proposed for collision avoidance, path planning, and navigation in complex waters. 
+Since maritime environments are dynamic, uncertain environments the navigation rules impose, 
+no single method is capable of solving all aspects of the problem satisfactorily. (Burmeister and 
+
+===== PAGE 4 =====
+
+Constapel, 2021) Current research directions in the field includes reactive local planning, 
+velocity-based collision avoidance, optimization -based trajectory generation, model -based 
+predictive control, and sensor-driven perception. To perform well in highly dynamic, multi-vessel 
+environments, each approach has specific strengths, but also their own weaknesses. (Han et al., 
+2026) 
+ 
+One of the most widespread approaches is the Artificial Potential Field (APF), where the motion 
+of a vessel is directed by a virtual force field where the goal generates an attractive force, and the 
+obstacles generate repulsive forces. The simplicity and low-cost of this method, together with the 
+ability to deploy it in real-time, has made it an effective local obstacle avoidance and short-path 
+modification technique for maritime vehicles. However, the characteristics of APF and its known 
+drawbacks limit its application in maritime navigation. In particular, the method can be trapped 
+in local minima when the attractive and repulsive forces balance out, or exhibit oscillations or 
+other unstable behaviors close to obstacles or constrained movement areas. (Lyu et al., 2024) 
+Since APF is mostly driven only by local geometric information, it is well known that it can 
+generate suboptimal routes in cluttered environments. Efficient variants of the method have 
+introduced effects such as relative velocity and directio n of motion of obstacles to allow 
+navigation in dynamic settings using smoother avoidance paths. (Li et al., 2024) Nevertheless, 
+APF-based methods remain reactive and local in their basic form, and their ability to encode high-
+level rule-based navigational intent is limited. 
+ 
+The Velocity Obstacle (VO) represents collision risk in velocity space, rather than in physical 
+space. Instead of planning a trajectory around the obstacles, VO defines the set of vessel 
+velocities which will result in a collision during a certain future t ime horizon. Safe navigation is 
+achieved by choosing a velocity outside of this forbidden region (Yu and Roh, 2024). VO is 
+therefore suitable for dynamic multi -vessel navigation, since it explicitly considers the relative 
+motion between the own vessel and the surrounding targets. Extensions of the method 
+considered constraints derived from the COLREGs, and hence it is a promising method for rule -
+compliant navigation in busy waterway. (Thyri and Breivik, 2022) The success of VO depends on 
+the accuracy of the  motion prediction and the available vessel sensor data. In case of noisy 
+measurements or uncertain motion of the surrounding vessels, the collision region in velocity 
+space might differ from the actual future encounter, which can result in over -conservative or 
+insufficient avoidance. (Wu et al., 2026). In dense traffic, the available velocity space might 
+become so limited that safe, efficient and rule -compliant navigation is impossible. (Cao et al., 
+2025) 
+ 
+Probabilistic trajectory optimization methods formulate navigation as an optimization over 
+trajectories, providing a higher -level planning perspective. Gaussian Process Motion Planning 
+(GPMP) has gained interest because the trajectory is represented as a c ontinuous-time 
+stochastic process and can be optimized via probabilistic inference. In this framework, the 
+uncertainty can be represented explicitly, the resulting trajectory can integrate the dynamics of 
+the vessel and can plan over long horizons rather t han reacting to the immediate next threat. 
+(Mustafa Mukadam et al., 2018) These are all desirable characteristics in a complex maritime 
+environment, where the optimization needs to incorporate trade -offs between safety, efficiency 
+and smoothness over time.  However, these advantages come at a cost: re -optimizing in a 
+dynamic scenario with multiple obstacles can be computationally expensive. (Meng et al., 2022) 
+Moreover, the cost functions, uncertainty models and non-linear constraints need to be specified 
+correctly; otherwise, the trajectory produced may be optimal in a mathematical sense but 
+undesirable in practice. In order to be used in real -time in a safety -critical maritime system, a 
+number of compromises is often needed. 
+ 
+
+===== PAGE 5 =====
+
+Model Predictive Control (MPC) is the other major research line that views the navigation problem 
+as a constrained optimization over a finite prediction horizon. The controller predicts the future 
+vessel states with a dynamic model and chooses control inpu ts which minimize a cost function 
+while respecting safety and dynamic constraints on the optimization decision variables. (Zhang 
+et al., 2022) The unified formulation enables vessel dynamics, actuator limits, obstacle 
+avoidance and navigation goals to all be considered simultaneously and in maritime applications 
+has been demonstrated to incorporate additional COLREGs related requirements in the 
+predictive decision making. But its drawback lies in the need to model for accurate system 
+representation and tuni ng of parameters. The maritime dynamics are generally nonlinear and 
+affected by environmental disturbances such as wind, waves and currents that need to be 
+considered. A non -accurate model will cause prediction errors that will result in poor control 
+performance. (Zhang et al., 2025) Poor tuning will result in increased conservatism or poor trade-
+off between safety and efficiency and the computational cost may increase rapidly when there 
+are many constraints and moving obstacles. Overall, it is powerful but needs to be implemented 
+effectively to realize its full potential for real-time maritime navigation. 
+ 
+From a perception perspective, LiDAR has taken a more prominent role, especially for 
+applications in ports and harbors, where a high spatial resolution and close -range accuracy are 
+essential. LiDAR sensors can provide high-density geometric information about the surroundings, 
+which is thus well suited for tasks such as obstacle detection, environmental mapping, and 
+short-range situational awareness.(Villa, Aaltonen and Koskinen, 2020) This data can even be 
+used in dynamic environments for detecting and trac king moving obstacle with a processing 
+pipeline consisting of filtering, clustering, data association, and multi -target tracking in order to 
+transform the raw point cloud data into meaningful representations on which the planning and 
+control modules can op erate.(Xie, Nanlal and Liu, 2024) Its performance, however, is also 
+affected by unfavorable weather conditions such as rain, fog, and sea spray, and by reflective 
+water and vessel motion. It also offers limited semantic insight compared with vision -based 
+sensors. Therefore, in practice, LiDAR data are frequently combined with camera, radar, GNSS, 
+and IMU sensor data to provide a more reliable source of situational awareness through the 
+fusion of sensor data.(von Brandis, Menges and Rasheed, 2024) 
+ 
+Taken together, this body of work shows a pattern that runs across all the papers. While there is 
+plenty of work in each module, particularly perception and local planning, there is still no total 
+architecture that unifies the sensing, rule interpretation,  behavior selection and trajectory 
+generation in a coherent and explainable way. Some papers have a robust perception pipeline, 
+but not much decision logic. Some paper advanced planners, but they are based on unrealistic 
+assumptions on the detection of obstacles, or on knowledge of the scenario. This is an important 
+issue, because safe maritime navigation, in the definitive sense of the word, is not a meager low-
+level control problem, but a complex high -level decision-making problem. A navigation system 
+must be able to compute collision threats, recognize maneuver types, interpret COLREGs 
+responsibilities, and select a proper planning response. This must be done in an explainable way, 
+that can be verified. In the more advanced papers, all these functions are achieved successfully, 
+but not all in a single driver. What is needed in the field is an integrated architecture that links the 
+perception module with the planner in an explainable decision -making layer, and with the 
+controller. The added version should i mprove not just functional performance, but also 
+interpretability, maintainability, and safety assurance. 
+Methodology / Planned work  
+The proposed framework has four components: perception, decision-making, path planning and 
+simulation. Instead of separating the components into independent modules, the suggested 
+
+===== PAGE 6 =====
+
+architecture ensures that the output of each layer feeds the next one, allowing the system to act 
+in a coordinated manner on its environment. 
+The goal of the perception module is to detect and track the objects in the surroundings based on 
+the raw sensor data. The process starts with a preprocessing step and the extraction of features, 
+which feed the clustering algorithm that aggregates the sensor returns and transforms them into 
+individual objects. Then a tracking algorithm is executed, which estimates the motion of the 
+objects over a period of time, and predicts their future initial condition. These predictions are 
+used by the path planning and decision layer, to create the situational picture on which navigation 
+decisions are based. Therefore, the accuracy and speed of the perception module are vital for the 
+system performance. 
+The decision -making module is implemented as a copy of a Behavior Tree. The navigation 
+behaviors are structured hierarchically, and specific behaviors can be easily added or replaced. 
+The decision layer encodes the navigational rules of COLREGs on encounte r and right -of-way 
+responsibilities as decision nodes of the tree. This structure allows the navigation decision to be 
+easily traced and justifiable by the system, which is mandatory for a safety -critical system. At 
+each time step, the tree is traversed fo llowing the current situation, providing a decision on the 
+mental model of the intended behavior. 
+Path planning is performed via a hybrid mechanism between a reactive planner and an 
+optimization-based approach. Characteristic of the former is immediate responsiveness to local 
+collision threats, which allows for local motion adjustments as the environment changes without 
+computationally expensive look -ahead. The second mechanism plans over a longer horizon, 
+generating smooth, dynamically -consistent trajectories that trade between safety, efficiency, 
+and vessel dynamics. Incorporating both mechanisms allo ws for responsiveness to the 
+environment for the former while still allowing for route and encounter-level planning for the latter. 
+The simulation environment will be built in Webots and will be the primary testbed for the system. 
+The environment will include realistic port-scale layouts, various numbers of moving vessels, and 
+realistic traffic volumes to evaluate the performance of the system under various conditions, 
+such as varying traffic densities, encounter geometries, and sensor availabilities, in or der to 
+establish the capabilities, failure modes, and boundaries of the proposed behavior -tree-based 
+approach before attempting the implementation of the system on a physical vessel. 
+Environmental and societal impact [~200 words] 
+The development of autonomous navigation systems for maritime applications carries 
+implications that extend well beyond technical performance. At a fundamental level, systems 
+that reduce reliance on human judgement in high -pressure navigational situations have the 
+potential to lower the incidence of collision-related accidents, many of which stem from fatigue, 
+inattention, or miscommunication between vessels. In busy waterways, where the 
+consequences of such accidents can be severe and wide-reaching, this represents a meaningful 
+contribution to maritime safety. 
+From an environmental standpoint, more efficient navigation directly translates to reduced fuel 
+consumption and lower emissions, supporting broader efforts toward sustainable maritime 
+operations. There is also a less direct but equally important benefit: r obust collision avoidance 
+reduces the likelihood of incidents that cause environmental damage, such as hull breaches 
+leading to oil spills or cargo loss that disrupts marine ecosystems. 
+
+===== PAGE 7 =====
+
+These benefits must, however, be weighed against genuine costs. The deployment of sensor -
+heavy autonomous systems carries its own energy burden, and the lifecycle of advanced 
+computational hardware raises questions about electronic waste that should not be  dismissed. 
+Perhaps more significantly, the gradual automation of navigational roles raises legitimate 
+concerns about employment in an industry where human expertise has historically been central. 
+These are not abstract concerns, and responsible developmen t of autonomous maritime 
+systems requires that they be taken seriously rather than treated as secondary to technical 
+objectives. 
+Addressing these tensions is partly a matter of design choices. Optimising algorithms to reduce 
+computational load, selecting energy-efficient hardware, and building systems that are intended 
+to assist rather than wholesale replace human operators are all practical steps that can reduce 
+the negative footprint of autonomous navigation technology. The goal is not automation for its 
+own sake, but the development of systems that make maritime operations safer, cleaner, and 
+more reliable in ways that account for their broader impact. 
+Gannt Chart 
+ 
+References 
+Alamoush, A.S. and Ölçer, A.I. (2025). Maritime Autonomous Surface Ships: Architecture for 
+Autonomous Navigation Systems. Journal of Marine Science and Engineering, 13(1), pp.122–122. 
+doi:https://doi.org/10.3390/jmse13010122. 
+Bae, I. and Hong, J. (2023). Survey on the Developments of Unmanned Marine Vehicles: 
+Intelligence and Cooperation.  Sensors, [online] 23(10), p.4643. 
+doi:https://doi.org/10.3390/s23104643. 
+Burmeister, H. -C. and Constapel, M. (2021). Autonomous Collision Avoidance at Sea: A 
+Survey. Frontiers in Robotics and AI, 8. doi:https://doi.org/10.3389/frobt.2021.739013. 
+Burmeister, H. -C. and Constapel, M. (2021). Autonomous Collision Avoidance at Sea: A 
+Survey. Frontiers in Robotics and AI, 8. doi:https://doi.org/10.3389/frobt.2021.739013. 
+
+
+===== PAGE 8 =====
+
+Cao, X., Wang, Z., Zhu, Y ., Zhang, T., Shi, G. and Shi, Y . (2025). A Review of Research on 
+Autonomous Collision Avoidance Performance Testing and an Evaluation of Intelligent 
+Vessels. Journal of Marine Science and Engineering , 13(8), p.1570. 
+doi:https://doi.org/10.3390/jmse13081570. 
+Cao, Y ., Zhang, G., Liu, Y ., Zhu, S., Sun, W. and Luo, Z. (2025). A collision avoidance decision -
+making system for autonomous vessels in constrained waterways based on velocity 
+obstacles. Ocean Engineering , 342, p.123013. 
+doi:https://doi.org/10.1016/j.oceaneng.2025.123013. 
+Cho, Y ., Han, J., Kim, J., Lee, P . and Park, S. -B. (2019). Experimental validation of a velocity 
+obstacle based collision avoidance algorithm for unmanned surface vehicles. IFAC -
+PapersOnLine, 52(21), pp.329–334. doi:https://doi.org/10.1016/j.ifacol.2019.12.328. 
+Colledanchise, M. and Ögren, P . (2018). Behavior Trees in Robotics and AI: An 
+Introduction. arXiv:1709.00084 [cs]. [online] doi:https://doi.org/10.1201/9780429489105. 
+Han, S., Lee, D., Kim, J. and Kim, J. (2026). A survey on maritime perception datasets and 
+technologies for autonomous surface vessels.  Intelligent Service Robotics , 19(2). 
+doi:https://doi.org/10.1007/s11370-025-00689-9. 
+Hu, L., Hu, H., Naeem, W. and Wang, Z. (2022). A review on COLREGs -compliant navigation of 
+autonomous surface vehicles: From traditional to learning -based approaches.  Journal of 
+Automation and Intelligence , [online] 1(1), p.100003. 
+doi:https://doi.org/10.1016/j.jai.2022.100003 
+Iovino, M., Scukins, E., Styrud, J., Ögren, P . and Smith, C. (2022). A survey of Behavior Trees in 
+robotics and AI.  Robotics and Autonomous Systems , 154, p.104096. 
+doi:https://doi.org/10.1016/j.robot.2022.104096. 
+Li, H., Wang, X., Guedes Soares, C. and Ni, S. (2024). A collision -avoidance decision -making 
+scheme based on artificial potential fields and event -triggered control. Ocean Engineering, 306, 
+p.118101. doi:https://doi.org/10.1016/j.oceaneng.2024.118101. 
+Li, Y ., Yu, Q., & Yang, Z. (2024). Vessel Trajectory Prediction for Enhanced Maritime Navigation 
+Safety: A Novel Hybrid Methodology.  Journal of Marine Science and Engineering , 12(8), 1351 –
+1351. https://doi.org/10.3390/jmse12081351 
+Lyu, H., Liu, W., Guo, S., Tan, G., Fu, C., Sun, X., Zhao, Y ., Zhang, L. and Yin, Y . (2024). Autonomous 
+collision avoidance method for MASSs based on precise potential field modelling and COLREGs 
+constraints in complex sailing environments.  Ocean Engineering , 292, p.116530. 
+doi:https://doi.org/10.1016/j.oceaneng.2023.116530. 
+Meng, J., Liu, Y ., Bucknall, R., Guo, W. and Ji, Z. (2022). Anisotropic GPMP2: A Fast Continuous -
+Time Gaussian Processes Based Motion Planner for Unmanned Surface Vehicles in Environments 
+With Ocean Currents.  IEEE Transactions on Automation Science and Engineering , pp.1 –18. 
+doi:https://doi.org/10.1109/tase.2021.3139163. 
+Merino-Fidalgo, S., Sánchez -Girón, C., Zalama, E., Gómez -García-Bermejo, J. and Duque -
+Domingo, J. (2025). Behavior tree generation and adaptation for a social robot control with 
+LLMs. Robotics and Autonomous Systems , 194, p.105165. 
+doi:https://doi.org/10.1016/j.robot.2025.105165. 
+
+===== PAGE 9 =====
+
+Mustafa Mukadam, Dong, J., Yan, X., Dellaert, F . and Boots, B. (2018). Continuous-time Gaussian 
+process motion planning via probabilistic inference.  The International Journal of Robotics 
+Research, 37(11), pp.1319–1340. doi:https://doi.org/10.1177/0278364918790369. 
+Thyri, E.H. and Breivik, M. (2022). Partly COLREGs -compliant collision avoidance for ASVs using 
+encounter-specific velocity obstacles.  IFAC-PapersOnLine, 55(31), pp.37 –43. 
+doi:https://doi.org/10.1016/j.ifacol.2022.10.406. 
+Villa, J., Aaltonen, J. and Koskinen, K.T. (2020). Path -Following With LiDAR -Based Obstacle 
+Avoidance of an Unmanned Surface Vehicle in Harbor Conditions.  IEEE/ASME Transactions on 
+Mechatronics, 25(4), pp.1812–1820. doi:https://doi.org/10.1109/tmech.2020.2997970. 
+von Brandis, A., Menges, D. and Rasheed, A. (2024). Multi -Target Tracking for Autonomous 
+Surface Vessels Using LiDAR and AIS Data Integration.  Applied Ocean Research , [online] 154, 
+p.104348. doi:https://doi.org/10.1016/j.apor.2024.104348. 
+Wu, B., Guo, H., Liu, Z. and Ma, W. (2026). Optimization method for collision avoidance paths of 
+unmanned vessels under ship position prediction uncertainty. Ocean Engineering, 346, p.123765. 
+doi:https://doi.org/10.1016/j.oceaneng.2025.123765. 
+Xie, Y ., Nanlal, C. and Liu, Y . (2024). Reliable LiDAR -based ship detection and tracking for 
+Autonomous Surface Vehicles in busy maritime environments.  Ocean Engineering , 312, 
+p.119288. doi:https://doi.org/10.1016/j.oceaneng.2024.119288. 
+Xu, H. and Guedes Soares, C. (2023). Review of Path -following Control Systems for Maritime 
+Autonomous Surface Ships.  Journal of Marine Science and Application , 22(2), pp.153 –171. 
+doi:https://doi.org/10.1007/s11804-023-00338-6. 
+Yu, D. and Roh, M.-I. (2024). Method for anti -collision path planning using velocity obstacle and 
+A* algorithms for maritime autonomous surface ship. International Journal of Naval Architecture 
+and Ocean Engineering , 16, pp.100586 –100586. 
+doi:https://doi.org/10.1016/j.ijnaoe.2024.100586. 
+Zhang, C., Dhyani, A., Ringsberg, J.W., Thies, F ., Negenborn, R.R. and Reppa, V . (2025). Nonlinear 
+model predictive control for path following of autonomous inland vessels in confined 
+waterways. Ocean Engineering , 334, p.121592. 
+doi:https://doi.org/10.1016/j.oceaneng.2025.121592. 
+Zhang, M., Hao, S., Wu, D., Chen, M.-L. and Yuan, Z.-M. (2022). Time-optimal obstacle avoidance 
+of autonomous ship based on nonlinear model predictive control.  Ocean Engineering , 266, 
+p.112591. doi:https://doi.org/10.1016/j.oceaneng.2022.112591. 
+Zhang, X., Wang, C., Jiang, L., An, L. and Yang, R. (2021). Collision-avoidance navigation systems 
+for Maritime Autonomous Surface Ships: A state of the art survey.  Ocean Engineering , 235, 
+p.109380. doi:https://doi.org/10.1016/j.oceaneng.2021.109380. 
+ 
+Appendix A Risk Assessments 
+A completed risk assessment for any initial experiments you plan. All research projects require 
+a risk assessment to be carried out, even if they are only desk based.  At this stage a completed 
+
+===== PAGE 10 =====
+
+form is sufficient, but you must also submit and have the risk assessment approved before 
+carrying out any experimental work (see Bb). See lecture and links on Bb for more information. 
+ 
+Appendix B GenAI (form signed by student) 
+Only section 2 is requires, the previous parts can be deleted as they are for your information. 
+GenAI Declaration Form 
+Include this form as an Appendix with all submissions 
+(including if you wish to declare no GenAI use) 
+1. GenAI Staff Declaration 
+Allowed GenAI* use in the following assignment is defined in 1A. GenAI Specification Table 
+Module Code Assignment Name / Description 
+FEEG6012 MSc Project 
+1A. GenAI Specification Table  
+Left column enter assignment parts (Task 1, Task 2, etc.) or All 
+Under coloured headers use pull downs to specify conditions for each use case (see 1B. GenAI Use 
+Case Codes) according to the legend 
+  ❌  PROHIBITED (i.e., default)              ALLOWED                  ✱  MANDATORY 
+Right column students MUST COMPLETE STANDARD DECLARATIONS 2. GenAI Student Declaration 
+if any use case is ALLOWED or MANDATORY . Staff may set additional declaration requirements (see 
+examples). If staff suspect a breach of Academic Responsibility and Conduct, they should contact 
+the Academic Conduct Officer of their host school as soon as reasonably practicable (see guidance) 
+Applies 
+to 
+GenAI NOT IN 
+submission GenAI IN submission Staff Use 
+Cases Additional 
+declaration  A1 A2 A3 A4 A5 A6 G1 G2 G3 G4 G5 G6 S1 S2 S3 
+Scoping 
+Study                                  
+G1 may be used 
+if you have 
+written approval 
+from your 
+supervisor. 
+1B. GenAI Use Case Definitions  
+ID GenAI Use 
+Case 
+Definition Example Prompt 
+A1 Debugging code Input code and error messages to 
+identify syntax or logic errors 
+Here are 20 lines of Python code and an error message. 
+Identify why this error is occurring. 
+A2 Checking spelling, 
+punctuation, grammar 
+Identify and suggest fixes for errors 
+without changing meaning 
+Check my technical report on fluid dynamics for spelling, 
+punctuation, and grammar errors without altering the 
+meaning. 
+A3 Essay planning Generate an outline and sections for an 
+essay based on topic and research 
+Create an outline for an essay on the impact of automation on 
+manufacturing, including sections and subsections. 
+
+===== PAGE 11 =====
+
+A4 Source 
+recommendations 
+Suggest relevant academic or credible 
+sources for a topic 
+Find peer-reviewed articles on renewable energy solutions for 
+remote rural regions. 
+A5 Design solution 
+suggestions 
+Propose ideas to solve specific design 
+challenges 
+Suggest amplifier circuits with low power consumption and 
+minimal noise. 
+A6 Function/library 
+recommendations 
+Recommend functions or libraries for 
+programming tasks Recommend Python libraries for simulating electrical circuits. 
+G1 Generating/correcting 
+code 
+Write or fix code based on a functional 
+prompt 
+Write Python code to control a servo motor using a Raspberry 
+Pi. 
+G2 Rewriting text Restructure and improve grammar/style 
+of written content 
+Rewrite my technical report on an electronic circuit to improve 
+clarity and coherence. 
+G3 Generating visuals Create diagrams, charts, or figures for 
+reports or presentations 
+Generate a schematic diagram of a microcontroller-based 
+temperature control system. 
+G4 Language translation Translate text and correct grammar in 
+the translation 
+Translate this technical documentation from German to 
+English and correct grammar errors. 
+G5 Writing report 
+sections/presentations 
+Produce report sections (e.g., abstract) 
+or presentation slides 
+Write an abstract for my research paper on power system 
+optimisation. 
+G6 Data analysis (ethics-
+approved) 
+Analyse datasets to find trends, 
+correlations, and insights 
+Analyse this dataset of IoT sensor readings to identify trends 
+and create visualisations. 
+Staff Defined Use Case: Define below, following the template above 
+S1    
+2. GenAI Student Declaration 
+Declarations DON’T AFFECT MARKS  unless Academic Responsibility and Conduct is 
+breached (see guidance) 
+One declaration is required for each student for both group and individual submissions. 
+General university guidance regarding GenAI can be found via the library 
+Name Student ID 
+Yida Zhu 33393559 
+Module Code Assignment name / description 
+FEEG6012 MSc Project 
+Have you used 
+GenAI? ☑ Yes         ☐  No Date (DD/MM/YYYY) 20/04/2026 
+2A. Standard Declaration: Complete for any use case you used 
+For each GenAI use (see definitions and codes over the page), summarise how it was applied to 
+each question. Provide 1-2 sentences per use category, including which tool you used. 
+e.g., Q1 A3 I used copilot to suggest section headings. I modified these for use in my report. 
+A2 G1 I used ChatGPT to debug my code and checking spelling of my words 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+===== PAGE 12 =====
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+2B. Academic Conduct 
+I acknowledge I have answered honestly on this declaration form ☑ 
+I understand if I was unsure about whether my actions met academic responsibility and 
+conduct requirements, it is my responsibility to confirm with the teaching team prior to 
+submission 
+☑ 
+I am aware of and have critically reviewed the content generated by GenAI used in this 
+submission. I accept responsibility for this content and can be asked about it in the future ☑ 
+ 
+ 

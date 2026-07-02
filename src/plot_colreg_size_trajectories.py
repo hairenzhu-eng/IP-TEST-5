@@ -20,6 +20,8 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 import numpy as np
 
+from webots_collision import collision_detected, collision_outcome_text
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
@@ -60,6 +62,7 @@ class RunRecord:
     median_pc2_m: float
     median_equivalent_radius_m: float
     size_metric_m: float
+    collision_detected: bool | None
     size_label: str = ""
 
 
@@ -429,6 +432,7 @@ def build_run_record(run_dir):
         median_pc2_m=median_pc2_m,
         median_equivalent_radius_m=median_equivalent_radius_m,
         size_metric_m=float(size_metric_m),
+        collision_detected=collision_detected(run_dir),
         size_label=size_label,
     )
 
@@ -486,7 +490,8 @@ def plot_group(records, output_path, padding_s):
         segment_ne_m = segment_for_plot(record, padding_s)
         label = (
             f"{record.size_label} {record.run_dir.name} "
-            f"(pc1={record.median_pc1_m:.2f} m)"
+            f"(pc1={record.median_pc1_m:.2f} m; "
+            f"{collision_outcome_text(record.run_dir)})"
         )
         color = colors.get(record.size_label, "#333333")
         ax.plot(
@@ -525,7 +530,8 @@ def plot_group(records, output_path, padding_s):
 
     ax.set_title(
         "Avoidance Trajectory Comparison\n"
-        f"{records[0].webots_pair_key.replace('_', ' ').title()}: Large vs Small"
+        f"{records[0].webots_pair_key.replace('_', ' ').title()}: Large vs Small\n"
+        "Collision from Webots ShipObstacle contact sensor"
     )
 
     ax.set_xlabel("East (m)")

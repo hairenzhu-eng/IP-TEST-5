@@ -20,6 +20,18 @@ from pglive.sources.live_plot import LiveScatterPlot
 from pglive.sources.live_plot_widget import LivePlotWidget
 import laptop as lt
 
+PLOT_RATE_HZ = 5.0
+
+
+def plot_connector(plot, max_points, auto_range=False):
+    return DataConnector(
+        plot,
+        max_points=max_points,
+        plot_rate=PLOT_RATE_HZ,
+        ignore_auto_range=not auto_range,
+    )
+
+
 class ShowLaptop(QWidget):
     obstacle_summary_signal = pyqtSignal(str)
     running = False
@@ -82,34 +94,34 @@ class ShowLaptop(QWidget):
         depthplot = LiveLinePlot(pen = 'red', name = 'Sensed Depth')
 
         # Data connectors for each plot with dequeue of 600 points
-        self.thruster1plot = DataConnector(thruster1plot, max_points=1500)
-        self.thruster2plot = DataConnector(thruster2plot, max_points=1500)
+        self.thruster1plot = plot_connector(thruster1plot, 1500, auto_range=True)
+        self.thruster2plot = plot_connector(thruster2plot, 1500)
         
-        self.DHP = DataConnector(ARUCOheadingplot, max_points=1500)
-        self.SHP = DataConnector(sensedheadingplot, max_points=1500)
-        self.EHP = DataConnector(EKFheadingplot, max_points=1500)
+        self.DHP = plot_connector(ARUCOheadingplot, 1500)
+        self.SHP = plot_connector(sensedheadingplot, 1500)
+        self.EHP = plot_connector(EKFheadingplot, 1500, auto_range=True)
         
-        self.pos = DataConnector(positionplot, max_points=1500)
-        self.ASP = DataConnector(ARUCOplot, max_points=1500)
-        self.WP = DataConnector(WayPoint, max_points=1500)
-        self.lidar = DataConnector(lidarplot, max_points=3000)
-        self.planned_path = DataConnector(plannedPathPlot, max_points=20)
-        self.apf_force = DataConnector(apfForcePlot, max_points=2)
-        self.apf_repulsive = DataConnector(apfRepulsivePlot, max_points=2)
-        self.apf_steering = DataConnector(apfSteeringPlot, max_points=2)
-        self.apf_target = DataConnector(apfTargetPlot, max_points=1)
-        self.obstacle_ekf_position = DataConnector(obstacleEkfPositionPlot, max_points=50)
-        self.obstacle_virtual_position = DataConnector(obstacleVirtualPositionPlot, max_points=50)
-        self.virtual_collision_position = DataConnector(virtualCollisionPositionPlot, max_points=50)
-        self.obstacle_ekf_history = DataConnector(obstacleEkfHistoryPlot, max_points=3000)
-        self.obstacle_ekf_prediction = DataConnector(obstacleEkfPredictionPlot, max_points=1000)
-        self.obstacle_ekf_direction = DataConnector(obstacleEkfDirectionPlot, max_points=200)
+        self.pos = plot_connector(positionplot, 1500)
+        self.ASP = plot_connector(ARUCOplot, 1500)
+        self.WP = plot_connector(WayPoint, 1500)
+        self.lidar = plot_connector(lidarplot, 3000)
+        self.planned_path = plot_connector(plannedPathPlot, 20, auto_range=True)
+        self.apf_force = plot_connector(apfForcePlot, 2)
+        self.apf_repulsive = plot_connector(apfRepulsivePlot, 2)
+        self.apf_steering = plot_connector(apfSteeringPlot, 2)
+        self.apf_target = plot_connector(apfTargetPlot, 1)
+        self.obstacle_ekf_position = plot_connector(obstacleEkfPositionPlot, 50)
+        self.obstacle_virtual_position = plot_connector(obstacleVirtualPositionPlot, 50)
+        self.virtual_collision_position = plot_connector(virtualCollisionPositionPlot, 50)
+        self.obstacle_ekf_history = plot_connector(obstacleEkfHistoryPlot, 3000)
+        self.obstacle_ekf_prediction = plot_connector(obstacleEkfPredictionPlot, 1000)
+        self.obstacle_ekf_direction = plot_connector(obstacleEkfDirectionPlot, 200)
         
-        self.dtplot = DataConnector(dtplot, max_points=1500)
-        self.Idtplot = DataConnector(Idtplot, max_points=1500)
-        self.Adtplot = DataConnector(Adtplot , max_points=1500)
+        self.dtplot = plot_connector(dtplot, 1500, auto_range=True)
+        self.Idtplot = plot_connector(Idtplot, 1500)
+        self.Adtplot = plot_connector(Adtplot, 1500)
 
-        self.deplot = DataConnector(depthplot, max_points=1500)
+        self.deplot = plot_connector(depthplot, 1500, auto_range=True)
 
         # Create plot itself
         #self.rpmplot = LivePlotWidget(title="Line Plot - Time series @ 2Hz", axisItems={'bottom': bottom_axis})
@@ -300,7 +312,13 @@ class ShowLaptop(QWidget):
         self.obstacle_ekf_history.cb_set_data(history_northings, history_eastings)
         self.obstacle_ekf_prediction.cb_set_data(prediction_northings, prediction_eastings)
         self.obstacle_ekf_direction.cb_set_data(direction_northings, direction_eastings)
-        self.obstacle_summary_signal.emit("Obstacle EKF: " + " | ".join(summaries[:3]) if summaries else "")
+        collision_text = (
+            "Webots ShipObstacle collision: YES"
+            if getattr(self.Laptop, "webots_collision_detected", False)
+            else "Webots ShipObstacle collision: NO"
+        )
+        track_text = " | Obstacle EKF: " + " | ".join(summaries[:3]) if summaries else ""
+        self.obstacle_summary_signal.emit(collision_text + track_text)
 
     def _update_virtual_collision_position_plot(self):
         northings = []
@@ -335,6 +353,8 @@ class ShowLaptop(QWidget):
                 valid_northings.append(point[0])
                 valid_eastings.append(point[1])
 
+        self._map_x_store = self._map_x_store[-3000:]
+        self._map_y_store = self._map_y_store[-3000:]
         if valid_northings:
             self.lidar.cb_append_data_array(valid_northings, valid_eastings)
 
@@ -444,7 +464,7 @@ class ShowLaptop(QWidget):
     def start_app(self):
         """Start Thread generator"""
         self.running = True
-        Thread(target=self.update).start()
+        Thread(target=self.update, daemon=True).start()
         
 if __name__ == '__main__':    
 

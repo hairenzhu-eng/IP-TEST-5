@@ -1,0 +1,75 @@
+project:
+  title: "面向繁忙水域的COLREG规则约束无人水面艇自主避碰"
+  question: "LiDAR聚类、EKF运动预测和基于目标尺度的改进APF能否在典型COLREG会遇场景中提高无人艇避碰安全性与行为可解释性？"
+  status: concluded
+  started: "2026-06-28"
+  domain: "autonomous surface vessel navigation"
+
+literature:
+  key_papers:
+    - id: imo1972colreg
+      title: "Convention on the International Regulations for Preventing Collisions at Sea, 1972"
+      authors: "International Maritime Organization"
+      year: 1972
+      relevance: "Rules 5-8 and 13-17 define lookout, risk, manoeuvre and encounter responsibilities."
+    - id: hu2022review
+      title: "A review on COLREGs-compliant navigation of autonomous surface vehicles"
+      authors: "Hu et al."
+      year: 2022
+      relevance: "Frames the pipeline as collision detection, decision making and path replanning."
+    - id: burmeister2021survey
+      title: "Autonomous Collision Avoidance at Sea: A Survey"
+      authors: "Burmeister and Constapel"
+      year: 2021
+      relevance: "Identifies limited COLREG coverage, sensor assumptions and inconsistent validation."
+    - id: iovino2022bt
+      title: "A survey of Behavior Trees in robotics and AI"
+      authors: "Iovino et al."
+      year: 2022
+      relevance: "Supports the scoping rationale for modular and interpretable decision logic."
+  open_problems:
+    - "No common validation protocol or collision-clearance threshold is used consistently."
+    - "Overtaking remains a failure mode in the current controller."
+    - "Full COLREG Part B coverage, multi-vessel traffic and real-platform trials remain untested."
+  evidence_gaps:
+    - "Behavior Tree and GPMP2 are scoped but not implemented in the inspected code."
+    - "Only one selected run per switch/scenario is available for the presented ablation figures."
+    - "Success labels use inconsistent clearance thresholds between generated figures and current post-processing code."
+
+hypotheses:
+  - id: H1
+    statement: "EKF-based obstacle prediction improves avoidance robustness in dynamic encounters."
+    status: supported
+    motivation: "EKF-on configurations have substantially more successful selected runs than EKF-off configurations."
+    priority: high
+  - id: H2
+    statement: "Cluster-size-aware APF improves clearance consistency compared with a fixed classical influence distance."
+    status: inconclusive
+    motivation: "Median clearance and size adaptation improve in several cases, but mean clearance and per-scenario outcomes are mixed."
+    priority: high
+  - id: H3
+    statement: "The rule router produces reliable COLREG-compliant behaviour across crossing, head-on and overtaking encounters."
+    status: refuted
+    motivation: "Crossing/head-on evidence is partial and overtaking fails in all presented switch combinations."
+    priority: high
+
+experiments:
+  proxy_metric: "minimum boundary clearance in metres, with scenario-local success labels treated as secondary"
+  baseline_value: null
+  best_value: 1.721202
+  total_runs: 32
+  trajectory: []
+
+outer_loop:
+  cycle: 1
+  last_direction: conclude
+  last_reflection: "The evidence supports a bounded contribution: EKF prediction is important and size-aware APF is promising, but full COLREG compliance is not demonstrated. The final theory revision now describes the implemented five-state CTRV EKF and PC1/PC2 elliptical APF with numbered equations and Harvard citations."
+
+workspace:
+  findings: "findings.md"
+  log: "research-log.md"
+  literature_dir: "literature/"
+  experiments_dir: "experiments/"
+  to_human_dir: "to_human/"
+  paper_dir: "paper/"
+  latest_manuscript: "paper/COLREG_Compliant_ASV_Navigation_Yida_Zhu_Final_Cited_Flowchart_APF_EKF.docx"

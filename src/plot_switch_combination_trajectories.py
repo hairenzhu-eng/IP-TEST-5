@@ -16,12 +16,12 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 import numpy as np
 
+from webots_collision import avoidance_succeeded
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
 DEFAULT_OUTPUT_DIR = DEFAULT_LOGS_DIR / "generated_figures"
-AVOIDANCE_SUCCESS_CLEARANCE_THRESHOLD_M = -0.3
-
 TIME_COLUMNS = ("TimeFromStart(s)", "TimeFromStart", "elapsed [s]")
 OWN_NORTH_COLUMNS = ("North(m)", "North", "x [m]")
 OWN_EAST_COLUMNS = ("East(m)", "East", "y [m]")
@@ -59,7 +59,6 @@ class RunRecord:
     colreg_rule: str
     webots_environment: str
     avoidance_succeeded: bool | None
-    minimum_collision_clearance_m: float
     time_s: np.ndarray
     own_position_ne_m: np.ndarray
     obstacle_position_ne_m: np.ndarray
@@ -229,55 +228,8 @@ def read_webots_environment(run_dir: Path, log_path: Path) -> str:
     )
 
 
-def read_avoidance_outcome(run_dir: Path) -> tuple[bool | None, float]:
-    clearances = []
-    for snapshot_path in sorted(run_dir.glob("obstacle_*.json")):
-        with snapshot_path.open(encoding="utf-8") as stream:
-            payload = json.load(stream)
-
-        robot_position = np.asarray(
-            payload.get("robot_pos", [np.nan, np.nan]),
-            dtype=float,
-        ).reshape(2)
-        settings = payload.get("apf_settings", {})
-        own_radius_m = (
-            parse_float(settings.get("own_equivalent_radius_m"))
-            if isinstance(settings, dict)
-            else np.nan
-        )
-        clusters = payload.get("clusters", [])
-        if (
-            not np.isfinite(robot_position).all()
-            or not np.isfinite(own_radius_m)
-            or own_radius_m <= 0.0
-            or not isinstance(clusters, list)
-        ):
-            continue
-
-        for cluster in clusters:
-            if not isinstance(cluster, dict):
-                continue
-            centre_ne = np.asarray(
-                cluster.get("centre_ne", [np.nan, np.nan]),
-                dtype=float,
-            ).reshape(2)
-            obstacle_radius_m = parse_float(cluster.get("equivalent_radius_m"))
-            if (
-                not np.isfinite(centre_ne).all()
-                or not np.isfinite(obstacle_radius_m)
-                or obstacle_radius_m <= 0.0
-            ):
-                continue
-            centre_distance_m = float(np.linalg.norm(robot_position - centre_ne))
-            clearances.append(centre_distance_m - (own_radius_m + obstacle_radius_m))
-
-    if not clearances:
-        return None, np.nan
-    minimum_clearance_m = float(np.min(clearances))
-    return (
-        minimum_clearance_m > AVOIDANCE_SUCCESS_CLEARANCE_THRESHOLD_M,
-        minimum_clearance_m,
-    )
+def read_avoidance_outcome(run_dir: Path) -> bool | None:
+    return avoidance_succeeded(run_dir)
 
 
 def parse_bool(value: object) -> bool | None:
@@ -392,6 +344,7 @@ def read_trajectory_series(
             time_s = parse_float(first_existing(row, TIME_COLUMNS))
             own_north = parse_float(first_existing(row, OWN_NORTH_COLUMNS))
             own_east = parse_float(first_existing(row, OWN_EAST_COLUMNS))
+            navigation_mode = str(row.get("NavigationMode", "")).strip().lower()
             if np.isfinite(time_s) and not np.isfinite(first_log_time_s):
                 first_log_time_s = time_s
             if not all(np.isfinite(value) for value in (time_s, own_north, own_east)):
@@ -405,6 +358,8 @@ def read_trajectory_series(
                 obstacle_positions.append([float(obstacle_north), float(obstacle_east)])
             else:
                 obstacle_positions.append([np.nan, np.nan])
+            if navigation_mode == "arrived":
+                break
 
     if not times:
         raise ValueError("No valid robot trajectory samples")
@@ -433,9 +388,7 @@ def load_run(run_dir: Path, forced_switch_combination: str | None = None) -> Run
     )
     colreg_rule = read_colreg_rule(run_dir, log_path)
     webots_environment = read_webots_environment(run_dir, log_path)
-    avoidance_succeeded, minimum_collision_clearance_m = read_avoidance_outcome(
-        run_dir
-    )
+    avoidance_succeeded = read_avoidance_outcome(run_dir)
     time_s, own_position_ne_m, obstacle_position_ne_m = read_trajectory_series(log_path)
     return RunRecord(
         run_dir=run_dir.resolve(),
@@ -445,7 +398,6 @@ def load_run(run_dir: Path, forced_switch_combination: str | None = None) -> Run
         colreg_rule=colreg_rule,
         webots_environment=webots_environment,
         avoidance_succeeded=avoidance_succeeded,
-        minimum_collision_clearance_m=minimum_collision_clearance_m,
         time_s=time_s,
         own_position_ne_m=own_position_ne_m,
         obstacle_position_ne_m=obstacle_position_ne_m,
@@ -473,6 +425,13 @@ def compare_environments(
     right: RunRecord,
     minimum_overlap_s: float,
 ) -> EnvironmentMatch | None:
+    if (
+        left.webots_environment == "webots_unknown"
+        or right.webots_environment == "webots_unknown"
+        or left.webots_environment != right.webots_environment
+    ):
+        return None
+
     if np.linalg.norm(left.initial_own_position_ne_m - right.initial_own_position_ne_m) > 0.5:
         return None
 
@@ -655,7 +614,7 @@ def plot_switch_trajectories(
     ax.set_title(
         "Robot Trajectory Comparison: "
         f"{title_name}\nAvoidance result: {group_avoidance_outcome_text(group)} "
-        f"(success: clearance > {AVOIDANCE_SUCCESS_CLEARANCE_THRESHOLD_M:.2f} m)"
+        "(Webots contact sensor)"
     )
     ax.set_xlabel("East position (m)")
     ax.set_ylabel("North position (m)")
@@ -749,25 +708,21 @@ def group_colreg_rule(group: dict[str, RunRecord]) -> str:
 def avoidance_outcome_text(record: RunRecord) -> str:
     if record.avoidance_succeeded is None:
         return "avoidance unknown"
-    outcome = "avoidance succeeded" if record.avoidance_succeeded else "avoidance failed"
-    if np.isfinite(record.minimum_collision_clearance_m):
-        return f"{outcome}, clearance {record.minimum_collision_clearance_m:.2f} m"
-    return outcome
+    return "avoidance succeeded" if record.avoidance_succeeded else "avoidance failed"
 
 
 def group_avoidance_outcome_text(group: dict[str, RunRecord]) -> str:
-    outcomes = [
-        record.avoidance_succeeded
-        for record in group.values()
-        if record.avoidance_succeeded is not None
-    ]
-    if not outcomes:
+    outcomes = [record.avoidance_succeeded for record in group.values()]
+    known = [outcome for outcome in outcomes if outcome is not None]
+    unknown = len(outcomes) - len(known)
+    if not known:
         return "unknown"
-    if all(outcomes):
+    if all(known) and unknown == 0:
         return "all selected runs succeeded"
-    failed = sum(not outcome for outcome in outcomes)
-    succeeded = sum(bool(outcome) for outcome in outcomes)
-    return f"{succeeded} succeeded, {failed} failed"
+    failed = sum(not outcome for outcome in known)
+    succeeded = sum(bool(outcome) for outcome in known)
+    suffix = f", {unknown} unknown" if unknown else ""
+    return f"{succeeded} succeeded, {failed} failed{suffix}"
 
 
 def group_webots_environment(group: dict[str, RunRecord]) -> str:

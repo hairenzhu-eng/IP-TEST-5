@@ -35,9 +35,11 @@ def _load_source_module(name, filename):
 
 
 _overtaking = _load_source_module("_laptop_overtaking_source", "laptop-overtaking.py")
+_head_on = _load_source_module("_laptop_head_on_source", "laptop-headon.py")
 _crossing = _load_source_module("_laptop_crossing_source", "laptop-crossing.py")
 
 _OvertakingController = _overtaking.LaptopController
+_HeadOnController = _head_on.LaptopController
 _CrossingController = _crossing.LaptopController
 
 cluster_principal_dimensions = _crossing.cluster_principal_dimensions
@@ -50,7 +52,7 @@ generate_papf_trajectory = _crossing.generate_papf_trajectory
 
 # Unified APF/EKF switch combinations. Change SWITCH_COMBINATION here, not in
 # the strategy source files.
-SWITCH_COMBINATION = "ekf_off_cluster_off"  # "ekf_on_cluster_on", "ekf_on_cluster_off", "ekf_off_cluster_on", "ekf_off_cluster_off"
+SWITCH_COMBINATION = os.environ.get("SWITCH_COMBINATION", "ekf_off_cluster_off")
 SWITCH_COMBINATIONS = {
     "ekf_on_cluster_on": (True, True),
     "ekf_on_cluster_off": (True, False),
@@ -69,8 +71,8 @@ def _mode_value(robot_value, simulation_value):
     return lambda controller: simulation_value if controller.OPERATING_MODE == 2 else robot_value
 
 
-# APF parameters whose values are identical in laptop-crossing.py and
-# laptop-overtaking.py. Parameters with different original values stay
+# APF parameters whose values are identical in all three strategy files.
+# Parameters with different original values stay
 # strategy-specific and are not listed here.
 UNIFIED_APF_PARAMS = {
     "apf_avoidance_pc_scale": 20.0,
@@ -101,7 +103,7 @@ UNIFIED_APF_PARAMS = {
 
 
 def _sync_strategy_switches():
-    for module in (_overtaking, _crossing):
+    for module in (_overtaking, _head_on, _crossing):
         module.ENABLE_OBSTACLE_EKF_PREDICTION = bool(ENABLE_OBSTACLE_EKF_PREDICTION)
         module.ENABLE_CLUSTER_BASED_APF_RANGE = bool(ENABLE_CLUSTER_BASED_APF_RANGE)
         module.CLASSIC_APF_INFLUENCE_DISTANCE_M = float(CLASSIC_APF_INFLUENCE_DISTANCE_M)
@@ -127,7 +129,14 @@ def _apply_unified_apf_params(controller):
 
     if hasattr(controller, "apf_build_encounter_params"):
         controller.apf_crossing_params = controller.apf_build_encounter_params()
-        controller.apf_overtaking_params = controller.apf_build_encounter_params()
+        controller.apf_overtaking_params = controller.apf_build_encounter_params(
+            avoidance_pc_scale=(
+                controller.apf_avoidance_pc_scale * _overtaking.OVERTAKING_APF_RANGE_SCALE
+            ),
+            direction_pc_scale=(
+                controller.apf_direction_pc_scale * _overtaking.OVERTAKING_APF_CLEARANCE_SCALE
+            ),
+        )
         controller.apf_head_on_params = controller.apf_build_encounter_params()
 
 
@@ -201,6 +210,41 @@ _CROSSING_METHODS = (
     "apf_repulsion_for_obstacle",
 )
 
+_HEAD_ON_METHODS = (
+    "apf_track_for_obstacle",
+    "obstacle_pc_dimensions",
+    "obstacle_length_axis_ne",
+    "apf_uses_cluster_range",
+    "apf_build_encounter_params",
+    "apf_profile_name_for_encounter",
+    "apf_params_for_encounter",
+    "apf_classic_qstar_m",
+    "apf_point_level_and_away",
+    "apf_repulsive_weight",
+    "apf_direction_clearance_m",
+    "apf_obstacle_level_and_away",
+    "apf_cpa_metrics",
+    "apf_pass_astern_side_from_velocity",
+    "own_prediction_velocity_ne",
+    "obstacle_track_state_at",
+    "update_apf_virtual_obstacles",
+    "virtual_collision_visuals",
+    "apf_classify_encounter",
+    "apf_default_side_from_obstacle",
+    "apf_obstacle_in_priority_front_sector",
+    "apf_lock_side",
+    "refresh_apf_side_lock",
+    "route_progress_and_point",
+    "goal_distance_m",
+    "final_approach_active",
+    "apf_path_attraction_body",
+    "apf_goal_attraction_body",
+    "apf_repulsion_for_obstacle_crossing",
+    "apf_avoidance_needed_crossing",
+    "compute_apf_control_crossing",
+    "apf_repulsion_for_obstacle",
+)
+
 
 class LaptopController(_OvertakingController):
     """One live controller instance with COLREG strategy dispatch."""
@@ -220,6 +264,11 @@ class LaptopController(_OvertakingController):
         self.apf_selected_controller = "default_apf"
         self._last_colreg_decision = None
         self.webots_environment = _detect_webots_environment(self.OPERATING_MODE)
+        if self.OPERATING_MODE == 2 and "overtaking" in self.webots_environment.lower():
+            self.route_tracking_speed_m_s = 1.0
+            self.apf_constant_descent_speed_m_s = 1.0
+            self.apf_overtaking_params["constant_descent_speed_m_s"] = 1.0
+            self.v_max = 1.0
         self._csv_context_last_patched_line_end = None
         self._ensure_csv_context_header()
         # Defaults used directly by laptop-crossing.py helpers when they run on
@@ -311,6 +360,26 @@ class LaptopController(_OvertakingController):
         previous = {}
         for name in _CROSSING_METHODS:
             method = getattr(_CrossingController, name, None)
+            if method is None:
+                continue
+            previous[name] = self.__dict__.get(name, _MISSING)
+            setattr(self, name, MethodType(method, self))
+
+        try:
+            yield
+        finally:
+            for name, value in previous.items():
+                if value is _MISSING:
+                    self.__dict__.pop(name, None)
+                else:
+                    setattr(self, name, value)
+
+    @contextmanager
+    def _head_on_strategy_methods(self):
+        """Temporarily use headon.py APF helpers on this same controller."""
+        previous = {}
+        for name in _HEAD_ON_METHODS:
+            method = getattr(_HeadOnController, name, None)
             if method is None:
                 continue
             previous[name] = self.__dict__.get(name, _MISSING)
@@ -443,8 +512,10 @@ class LaptopController(_OvertakingController):
                 continue
 
         rule = best["rule"]
-        if rule in self._HEAD_ON_RULES | self._OVERTAKING_RULES:
-            best["controller"] = "overtaking_head_on"
+        if rule in self._HEAD_ON_RULES:
+            best["controller"] = "head_on"
+        elif rule in self._OVERTAKING_RULES:
+            best["controller"] = "overtaking"
         elif rule in self._CROSSING_RULES:
             best["controller"] = "crossing"
 
@@ -455,9 +526,12 @@ class LaptopController(_OvertakingController):
         return self.select_colreg_strategy()
 
     def _mark_selected_controller(self, rule):
-        if rule in self._HEAD_ON_RULES | self._OVERTAKING_RULES:
-            self.apf_selected_controller = "overtaking_head_on"
-            self.apf_active_profile_name = "head_on" if rule == "head_on" else "overtaking"
+        if rule in self._HEAD_ON_RULES:
+            self.apf_selected_controller = "head_on"
+            self.apf_active_profile_name = "head_on"
+        elif rule in self._OVERTAKING_RULES:
+            self.apf_selected_controller = "overtaking"
+            self.apf_active_profile_name = "overtaking"
         elif rule in self._CROSSING_RULES:
             self.apf_selected_controller = "crossing"
             self.apf_active_profile_name = "crossing"
@@ -469,7 +543,10 @@ class LaptopController(_OvertakingController):
         selected_rule = self.select_colreg_strategy()
         self._mark_selected_controller(selected_rule)
 
-        if selected_rule in self._HEAD_ON_RULES | self._OVERTAKING_RULES:
+        if selected_rule in self._HEAD_ON_RULES:
+            with self._head_on_strategy_methods():
+                u_cmd = _HeadOnController.compute_apf_control(self, t, u_track)
+        elif selected_rule in self._OVERTAKING_RULES:
             u_cmd = _OvertakingController.compute_apf_control(self, t, u_track)
         elif selected_rule in self._CROSSING_RULES:
             with self._crossing_strategy_methods():
@@ -488,6 +565,9 @@ class LaptopController(_OvertakingController):
     def apf_avoidance_needed(self):
         selected_rule = self.select_colreg_strategy()
         self._mark_selected_controller(selected_rule)
+        if selected_rule in self._HEAD_ON_RULES:
+            with self._head_on_strategy_methods():
+                return _HeadOnController.apf_avoidance_needed(self)
         if selected_rule in self._CROSSING_RULES:
             with self._crossing_strategy_methods():
                 return _CrossingController.apf_avoidance_needed(self)

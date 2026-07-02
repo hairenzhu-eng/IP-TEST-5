@@ -15,11 +15,20 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 import numpy as np
 
+from plot_colreg_size_trajectories import (
+    collect_grouped_runs,
+    collect_snapshot_samples,
+    merged_output_name,
+    pair_large_small_records,
+)
+from webots_collision import collision_detected, collision_outcome_text
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
 DEFAULT_OUTPUT_DIR = DEFAULT_LOGS_DIR / "generated_figures"
 DEFAULT_DISTANCE_OUTPUT_DIR = DEFAULT_OUTPUT_DIR / "webots_distance_groups"
+DEFAULT_SIZE_COMPARISON_OUTPUT_DIR = DEFAULT_OUTPUT_DIR / "pc_size_comparisons"
 
 TIME_COLUMNS = ("TimeFromStart(s)", "TimeFromStart", "elapsed [s]")
 OWN_NORTH_COLUMNS = ("North(m)", "North", "x [m]")
@@ -50,20 +59,11 @@ class DistanceRun:
     switch_combination: str
     time_s: np.ndarray
     distance_m: np.ndarray
-    collision_time_s: np.ndarray
-    collision_boundary_m: np.ndarray
+    collision_detected: bool | None
 
     @property
-    def minimum_clearance_m(self):
-        boundary = np.interp(
-            self.time_s,
-            self.collision_time_s,
-            self.collision_boundary_m,
-            left=np.nan,
-            right=np.nan,
-        )
-        clearance = self.distance_m - boundary
-        return float(np.nanmin(clearance))
+    def minimum_distance_m(self):
+        return float(np.nanmin(self.distance_m))
 
 
 def positive_float(value):
@@ -189,69 +189,6 @@ def read_distance_series(log_path):
     distance_array = distance_array[order]
     time_array -= float(first_time_s) if np.isfinite(first_time_s) else time_array[0]
     return time_array, distance_array, float(first_time_s)
-
-
-def read_collision_boundary_series(run_dir, first_log_time_s):
-    times = []
-    boundaries = []
-    own_radius_m = np.nan
-
-    for path in sorted(Path(run_dir).glob("obstacle_*.json")):
-        try:
-            with path.open(encoding="utf-8") as stream:
-                payload = json.load(stream)
-        except (OSError, json.JSONDecodeError):
-            continue
-
-        settings = payload.get("apf_settings", {})
-        if isinstance(settings, dict):
-            radius = parse_float(settings.get("own_equivalent_radius_m"))
-            if np.isfinite(radius) and radius > 0.0:
-                if np.isfinite(own_radius_m) and not np.isclose(own_radius_m, radius):
-                    raise ValueError("Own-ship radius changes within the run")
-                own_radius_m = radius
-
-        time_s = parse_float(payload.get("t"))
-        robot_pos = np.asarray(payload.get("robot_pos", [np.nan, np.nan]), dtype=float)
-        clusters = payload.get("clusters", [])
-        if (
-            not np.isfinite(time_s)
-            or not np.isfinite(own_radius_m)
-            or robot_pos.size < 2
-            or not np.isfinite(robot_pos[:2]).all()
-            or not isinstance(clusters, list)
-        ):
-            continue
-
-        candidates = []
-        for cluster in clusters:
-            if not isinstance(cluster, dict):
-                continue
-            centre = np.asarray(cluster.get("centre_ne", [np.nan, np.nan]), dtype=float)
-            obstacle_radius_m = parse_float(cluster.get("equivalent_radius_m"))
-            if (
-                centre.size < 2
-                or not np.isfinite(centre[:2]).all()
-                or not np.isfinite(obstacle_radius_m)
-                or obstacle_radius_m <= 0.0
-            ):
-                continue
-            centre_distance_m = float(np.linalg.norm(robot_pos[:2] - centre[:2]))
-            boundary_m = float(own_radius_m + obstacle_radius_m)
-            candidates.append((centre_distance_m - boundary_m, centre_distance_m, boundary_m))
-
-        if candidates:
-            _, _, boundary_m = min(candidates, key=lambda item: item[0])
-            times.append(float(time_s) - first_log_time_s)
-            boundaries.append(boundary_m)
-
-    if not times:
-        raise ValueError("No valid collision-boundary samples")
-
-    time_array = np.asarray(times, dtype=float)
-    boundary_array = np.asarray(boundaries, dtype=float)
-    order = np.argsort(time_array)
-    return time_array[order], boundary_array[order]
 
 
 def load_cluster_dimensions(run_dir):
@@ -382,24 +319,88 @@ def plot_cluster_dimensions(run_dir, output_path=None):
     return output_path, pc1_mean_m, pc2_mean_m, len(all_samples)
 
 
+def plot_large_small_pc_pair(records, output_path):
+    """Plot PC1 and PC2 time series for one matched large/small Webots pair."""
+    colors = {"Small": "#0072B2", "Large": "#D55E00"}
+    scenario = (
+        records[0].webots_pair_key.removeprefix("mr_webots_")
+        .replace("_size_ship", "")
+        .replace("_", " ")
+        .title()
+    )
+    fig, ax = plt.subplots(figsize=(10, 5.8))
+
+    for record in sorted(records, key=lambda item: item.size_label, reverse=True):
+        samples = collect_snapshot_samples(record.run_dir)
+        if not samples:
+            continue
+        first_time_s = samples[0].time_s
+        time_s = [sample.time_s - first_time_s for sample in samples]
+        color = colors[record.size_label]
+        ax.plot(
+            time_s,
+            [sample.obstacle_pc1_m for sample in samples],
+            color=color,
+            linewidth=1.8,
+            label=f"{record.size_label} ship PC1",
+        )
+        ax.plot(
+            time_s,
+            [sample.obstacle_pc2_m for sample in samples],
+            color=color,
+            linestyle="--",
+            linewidth=1.8,
+            label=f"{record.size_label} ship PC2",
+        )
+
+    ax.set_title(
+        "Principal Component Size over Time\n"
+        f"{scenario}: Large vs Small"
+    )
+    ax.set_xlabel("Time from first obstacle sample (s)")
+    ax.set_ylabel("Size (m)")
+    ax.set_xlim(left=0.0)
+    ax.set_ylim(bottom=0.0)
+    ax.grid(True, linestyle=":", alpha=0.35)
+    ax.legend()
+    fig.tight_layout()
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+    return output_path
+
+
+def plot_large_small_pc_comparisons(logs_dir, output_dir, run_dirs=None):
+    """Plot the latest EKF-on/size-on large-small pair for each Webots scene."""
+    records = collect_grouped_runs(logs_dir, run_dirs=run_dirs)
+    pairs = pair_large_small_records(records)
+    if not pairs:
+        raise ValueError(
+            "No matched large/small Webots runs with EKF and size both enabled"
+        )
+
+    outputs = []
+    for pair in pairs:
+        output_path = Path(output_dir) / f"{merged_output_name(pair)}_pc1_pc2.png"
+        outputs.append((plot_large_small_pc_pair(pair, output_path), pair))
+    return outputs
+
+
 def load_distance_run(run_dir):
     log_path = find_primary_csv(run_dir)
     if log_path is None:
         raise FileNotFoundError("No primary log_*.csv file")
     webots_environment, switch_combination = read_log_metadata(log_path)
-    time_s, distance_m, first_log_time_s = read_distance_series(log_path)
-    collision_time_s, collision_boundary_m = read_collision_boundary_series(
-        run_dir,
-        first_log_time_s,
-    )
+    time_s, distance_m, _ = read_distance_series(log_path)
     return DistanceRun(
         run_dir=Path(run_dir),
         webots_environment=webots_environment,
         switch_combination=switch_combination,
         time_s=time_s,
         distance_m=distance_m,
-        collision_time_s=collision_time_s,
-        collision_boundary_m=collision_boundary_m,
+        collision_detected=collision_detected(run_dir),
     )
 
 
@@ -442,7 +443,8 @@ def plot_webots_distance_group(webots_environment, group, output_dir):
         style = SWITCH_STYLES[switch]
         label = (
             f"{SWITCH_LABELS[switch]} {record.run_dir.name} "
-            f"(min clearance {record.minimum_clearance_m:.2f} m)"
+            f"(min distance {record.minimum_distance_m:.2f} m; "
+            f"{collision_outcome_text(record.run_dir)})"
         )
         ax.plot(
             record.time_s,
@@ -451,19 +453,10 @@ def plot_webots_distance_group(webots_environment, group, output_dir):
             label=label,
             **style,
         )
-        ax.plot(
-            record.collision_time_s,
-            record.collision_boundary_m,
-            color=style["color"],
-            linestyle=":",
-            linewidth=1.1,
-            alpha=0.8,
-            label=f"{SWITCH_LABELS[switch]} collision boundary",
-        )
-
     ax.set_title(
         "Distance to nearest obstacle\n"
-        f"{webots_environment.replace('_', ' ').title()}"
+        f"{webots_environment.replace('_', ' ').title()} "
+        "(collision from Webots ShipObstacle contact sensor)"
     )
     ax.set_xlabel("Time from log start (s)")
     ax.set_ylabel("Distance (m)")
@@ -533,7 +526,31 @@ def main():
         default=DEFAULT_DISTANCE_OUTPUT_DIR,
         help="Output directory for grouped Webots distance figures.",
     )
+    parser.add_argument(
+        "--size-comparison",
+        action="store_true",
+        help="Compare PC1/PC2 for matched large/small EKF-on and size-on runs.",
+    )
+    parser.add_argument(
+        "--size-comparison-output-dir",
+        type=Path,
+        default=DEFAULT_SIZE_COMPARISON_OUTPUT_DIR,
+        help="Output directory for large/small PC1/PC2 figures.",
+    )
     args = parser.parse_args()
+
+    if args.size_comparison:
+        run_dirs = [args.run_dir] if args.run_dir else None
+        outputs = plot_large_small_pc_comparisons(
+            args.logs_dir,
+            args.size_comparison_output_dir,
+            run_dirs=run_dirs,
+        )
+        for output_path, pair in outputs:
+            print(f"Figure: {output_path}")
+            for record in pair:
+                print(f"  {record.size_label}: {record.run_dir.name}")
+        return
 
     if args.pc_dimensions:
         if not args.run_dir:
@@ -560,7 +577,8 @@ def main():
             if record is not None:
                 print(
                     f"  {SWITCH_LABELS[switch]}: {record.run_dir.name}, "
-                    f"min clearance={record.minimum_clearance_m:.3f} m"
+                    f"min distance={record.minimum_distance_m:.3f} m, "
+                    f"{collision_outcome_text(record.run_dir)}"
                 )
         print(f"Skipped {len(skipped)} unclassifiable runs.")
         return
@@ -576,7 +594,8 @@ def main():
             if record is not None:
                 print(
                     f"  {SWITCH_LABELS[switch]}: {record.run_dir.name}, "
-                    f"min clearance={record.minimum_clearance_m:.3f} m"
+                    f"min distance={record.minimum_distance_m:.3f} m, "
+                    f"{collision_outcome_text(record.run_dir)}"
                 )
     print(f"Skipped {len(skipped)} unclassifiable runs.")
 

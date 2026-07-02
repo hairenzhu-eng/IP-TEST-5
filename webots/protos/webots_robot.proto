@@ -12,7 +12,7 @@ PROTO webots_robot [
   field  SFString    customData      ""
   field  SFBool      supervisor      TRUE
   field  SFBool      synchronization TRUE
-  field  SFBool      selfCollision   TRUE
+  field  SFBool      selfCollision   FALSE
   field  MFNode      fluidDynamics   [
     ImmersionProperties {
       fluidName "water"
@@ -229,6 +229,32 @@ PROTO webots_robot [
             rotation 1 0 0 0
             }
           Compass { name "compass" }
+          TouchSensor {
+            name "collision sensor"
+            type "bumper"
+            boundingObject Group {
+              children [
+                Transform {
+                  translation 0 -0.16 -0.05
+                  children [
+                    Box { size 0.504 0.044 0.084 }
+                  ]
+                }
+                Transform {
+                  translation 0 0.16 -0.05
+                  children [
+                    Box { size 0.504 0.044 0.084 }
+                  ]
+                }
+                Transform {
+                  translation 0 0 -0.05
+                  children [
+                    Box { size 0.044 0.324 0.044 }
+                  ]
+                }
+              ]
+            }
+          }
         ]
       }
     ]

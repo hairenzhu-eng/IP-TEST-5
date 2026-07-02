@@ -542,6 +542,7 @@ class WebotsController(Supervisor):
         )
 
         self.sonar_pub = Publisher("/sonar", geometry_msgs.Vector3)
+        self.collision_pub = Publisher("/collision", geometry_msgs.Vector3)
         self.laserscan_pub = Publisher("/lidar", range_bearing_msgs.RBLaserScan)
 
 
@@ -566,6 +567,11 @@ class WebotsController(Supervisor):
 
         self.compass = self.getDevice("compass")
         self.compass.enable(self.timeStep)
+
+        self.collision_sensor = self.getDevice("collision sensor")
+        self.collision_sensor.enable(self.timeStep)
+        self.collision_detected = False
+        self.first_collision_time_s = -1.0
 
         self.num_lidar_msgs = 0
         self.lidar = None
@@ -737,6 +743,7 @@ class WebotsController(Supervisor):
                 "yaw_rate": 0.0,
                 "turn_radius": 0.0,
                 "lock_y": -1.0,
+                "stop_x": 10.0,
                 "start_with_zero_speed": True,
             },
             "HEAD_ON_OBSTACLE_ROBOT": {
@@ -748,6 +755,15 @@ class WebotsController(Supervisor):
                 "start_with_zero_speed": True,
             },
         }
+        custom_data = self.getCustomData()
+        if custom_data.startswith("front_obstacle_speed="):
+            front_obstacle_speed = self._positive_float(custom_data.partition("=")[2])
+            if front_obstacle_speed is not None:
+                self.motion_target_configs["FRONT_OBSTACLE_ROBOT"].update(
+                    speed=front_obstacle_speed,
+                    acceleration=0.0,
+                    start_with_zero_speed=False,
+                )
 
         moving_target_names = (
             "CROSSING_LEFT_TO_RIGHT_ROBOT",
@@ -840,6 +856,7 @@ class WebotsController(Supervisor):
         self._shutdown_zeroros_endpoint(getattr(self, "groundtruth_pub", None))
         self._shutdown_zeroros_endpoint(getattr(self, "gyro_pub", None))
         self._shutdown_zeroros_endpoint(getattr(self, "sonar_pub", None))
+        self._shutdown_zeroros_endpoint(getattr(self, "collision_pub", None))
         self._shutdown_zeroros_endpoint(getattr(self, "laserscan_pub", None))
 
         broker = getattr(self, "broker", None)
@@ -932,6 +949,7 @@ class WebotsController(Supervisor):
         bounce_y_bottom=None,
         bounce_x_left=None,
         bounce_x_right=None,
+        stop_x=None,
         start_with_zero_speed=False,
         match_ego_route_speed=False,
     ):
@@ -966,6 +984,7 @@ class WebotsController(Supervisor):
             "bounce_y_bottom": bounce_y_bottom,
             "bounce_x_left": bounce_x_left,
             "bounce_x_right": bounce_x_right,
+            "stop_x": stop_x,
             "match_ego_route_speed": bool(match_ego_route_speed),
             "speed_scale_from_ego_route": None,
         }
@@ -1046,6 +1065,10 @@ class WebotsController(Supervisor):
             target["position"][0] = float(target["lock_x"])
         if target["lock_y"] is not None and abs(yaw_rate) <= 1e-9 and abs(turn_radius) <= 1e-9:
             target["position"][1] = float(target["lock_y"])
+        if target["stop_x"] is not None and target["position"][0] >= target["stop_x"]:
+            target["position"][0] = float(target["stop_x"])
+            target["speed"] = 0.0
+            target["current_speed"] = 0.0
 
         wrap_y_top = target["wrap_y_top"]
         wrap_y_bottom = target["wrap_y_bottom"]
@@ -1127,6 +1150,17 @@ class WebotsController(Supervisor):
         self.dynamics_engine()
 
         current_time = datetime.now(UTC).timestamp()
+        collision_contact = self.collision_sensor.getValue() > 0.0
+        if collision_contact and not self.collision_detected:
+            self.collision_detected = True
+            self.first_collision_time_s = current_time - self.start_time
+            print(f"Collision detected at {self.first_collision_time_s:.3f} s")
+        collision_msg = geometry_msgs.Vector3()
+        collision_msg.x = float(collision_contact)
+        collision_msg.y = float(self.collision_detected)
+        collision_msg.z = self.first_collision_time_s
+        self.collision_pub.publish(collision_msg)
+
         if (
             self.lidar is not None
             and self.lidar_rate is not None

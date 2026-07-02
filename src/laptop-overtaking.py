@@ -54,6 +54,8 @@ ENABLE_OBSTACLE_EKF_PREDICTION = True
 # False: ignore cluster dimensions and use the classical APF distance Q*.
 ENABLE_CLUSTER_BASED_APF_RANGE = True
 CLASSIC_APF_INFLUENCE_DISTANCE_M = 5.0
+OVERTAKING_APF_RANGE_SCALE = 2.5
+OVERTAKING_APF_CLEARANCE_SCALE = 2.0
 
 
 # define global functions
@@ -260,6 +262,8 @@ class LaptopController:
         self.filename = self.run_dir / f"log_{filename_time}.csv"
         self.obstacle_log_dir = self.run_dir
         self.last_obstacle_snapshot_stamp_s = None
+        self.webots_collision_detected = False
+        self.webots_collision_record_written = False
         
         with self.filename.open('w') as f:
             f.write("EpochTime(s),TimeFromStart(s),right_prop_rate(rad/s),left_prop_rate(rad/s),LastDT(s),Yaw(rad),North(m),East(m),IMUSensedYawRate(rad/s),IMUIntegratedYaw(rad),IMUSensedTimeStamp(s),ARUCOSensedNorth(m),ARUCOSensedEast(m),ARUCOSensedYaw(rad),ArucoSensedTimeStamp(s),DepthTimeStamp(s),Depth(m),NavigationMode,APFEncounter,APFSide,APFDCPA(m),APFTCPA(s),APFForceX,APFForceY,NearestObstacleNorth(m),NearestObstacleEast(m),NearestObstacleDistance(m)\n")
@@ -271,7 +275,7 @@ class LaptopController:
         start_north, start_east = 0, 1
 
         # Goal waypoint: (North, East) in metres
-        goal_north, goal_east = 10, 1
+        goal_north, goal_east = 15, 1
 
         north_path = [start_north, goal_north]
         east_path = [start_east, goal_east]
@@ -375,10 +379,10 @@ class LaptopController:
         # ----------------  APF parameters ----------------
         self.apf_cluster_range_enabled = ENABLE_CLUSTER_BASED_APF_RANGE
         self.apf_classic_influence_distance_m = CLASSIC_APF_INFLUENCE_DISTANCE_M
-        self.apf_risk_pc_scale = 10.0
-        self.apf_avoidance_pc_scale = 20.0
-        self.apf_direction_pc_scale = 30.0
-        self.apf_virtual_pc_scale = 20.0
+        self.apf_risk_pc_scale = 15.0
+        self.apf_avoidance_pc_scale = 30.0
+        self.apf_direction_pc_scale = 40.0
+        self.apf_virtual_pc_scale = 30.0
         self.apf_activation_front_half_angle_rad = np.deg2rad(150.0)
         self.apf_priority_front_half_angle_rad = np.deg2rad(90.0)
         self.apf_goal_gain = 5.5
@@ -395,6 +399,10 @@ class LaptopController:
         self.apf_heading_gain = 0.9
         self.apf_heading_step_limit_rad = np.deg2rad(60.0)
         self.apf_min_forward_speed = 0.06
+        self.apf_overtaking_close_distance_m = 3.0
+        self.apf_overtaking_close_turn_angle_rad = np.deg2rad(55.0)
+        self.apf_overtaking_turn_release_angle_rad = np.deg2rad(40.0)
+        self.apf_overtaking_close_turn_speed_m_s = 0.15 if self.OPERATING_MODE == 2 else 0.10
         # Fixed-step APF descent: the potential-field gradient determines only
         # the travel direction while avoidance uses a constant surge speed.
         self.apf_constant_descent_speed_m_s = self.route_tracking_speed_m_s
@@ -453,7 +461,10 @@ class LaptopController:
         # values exactly so its avoidance trajectory is unchanged; overtaking
         # and head-on get independent parameter sets in this file for isolated tuning.
         self.apf_crossing_params = self.apf_build_encounter_params()
-        self.apf_overtaking_params = self.apf_build_encounter_params()
+        self.apf_overtaking_params = self.apf_build_encounter_params(
+            avoidance_pc_scale=self.apf_avoidance_pc_scale * OVERTAKING_APF_RANGE_SCALE,
+            direction_pc_scale=self.apf_direction_pc_scale * OVERTAKING_APF_CLEARANCE_SCALE,
+        )
         self.apf_head_on_params = self.apf_build_encounter_params()
         self.apf_active_profile_name = "crossing"
         Console.info(
@@ -615,6 +626,11 @@ class LaptopController:
         self.imu_sub = Subscriber("/imu", Vector3, self.imu_cb, ip=self.robot_ip)
         self.sonar_sub = Subscriber("/sonar", Vector3, self.sonar_cb, ip=self.robot_ip)
         self.lidar_sub = Subscriber("/lidar", RBLaserScan, self.lidar_callback, ip=self.robot_ip)
+        self.collision_sub = (
+            Subscriber("/collision", Vector3, self.collision_cb, ip=self.robot_ip)
+            if OPERATING_MODE == 2
+            else None
+        )
         self.console_sub = Subscriber("/command", String, self.command_cb, ip=self.robot_ip)
         self.aruco_driver = ArUcoUDPDriver(aruco_params, parent=self)        
         # a callback only used by WEBOTS to fake Aruco readings 
@@ -655,6 +671,8 @@ class LaptopController:
                         self.imu_sub.stop()
                         self.sonar_sub.stop()
                         self.lidar_sub.stop()
+                        if self.collision_sub is not None:
+                            self.collision_sub.stop()
                     break
                 self.r.sleep() 
         ############################## END OF INITIALISATION ##################
@@ -669,6 +687,8 @@ class LaptopController:
             self.r.sleep()
         self.sonar_sub.stop()
         self.lidar_sub.stop()
+        if self.collision_sub is not None:
+            self.collision_sub.stop()
         Console.info("Thrusters stopped")
         Console.info("Data saved in ",self.filename)
         self.r.sleep()
@@ -680,9 +700,26 @@ class LaptopController:
         self.robot_available = True
         
     def sonar_cb(self,msg: Vector3):
-        self.sensed_bottom_depth_m = msg.z/1000        
+        self.sensed_bottom_depth_m = msg.z/1000
         self.sensed_bottom_depth_stamp_s = time.time()
         self.robot_available = True
+
+    def collision_cb(self, msg: Vector3):
+        detected = bool(msg.y)
+        if self.webots_collision_record_written and detected == self.webots_collision_detected:
+            return
+
+        self.webots_collision_detected = detected
+        self.webots_collision_record_written = True
+        payload = {
+            "source": "webots_touch_sensor",
+            "obstacle_model": "ShipObstacle",
+            "sensor_available": True,
+            "detected": detected,
+            "first_contact_time_s": float(msg.z) if detected and msg.z >= 0.0 else None,
+        }
+        with (self.run_dir / "webots_collision.json").open("w") as stream:
+            json.dump(payload, stream, indent=2)
 
     def command_cb(self,msg: String):
         Console.info(f"Response from robot: {msg.data}")
@@ -2383,6 +2420,9 @@ class LaptopController:
         dynamic_obstacle = obs_speed >= self.apf_dynamic_speed_threshold_m_s
         relative_heading_deg = np.nan
 
+        if "overtaking" in str(getattr(self, "webots_environment", "")).lower():
+            return "overtaking", -1.0, "COLREG Rule 13: overtake on starboard side"
+
         if dynamic_obstacle:
             relative_heading_deg = abs(float(np.rad2deg(wrap_angle(np.arctan2(obs_vel_body[1], obs_vel_body[0])))))
 
@@ -2395,7 +2435,7 @@ class LaptopController:
             and relative_heading_deg <= 67.5
             and own_speed > obs_speed + self.apf_dynamic_speed_threshold_m_s
         ):
-            return "overtaking", 1.0, "COLREG Rule 13: overtake on port side"
+            return "overtaking", -1.0, "COLREG Rule 13: overtake on starboard side"
 
         pass_astern_side = self.apf_pass_astern_side_from_velocity(obs_vel_body)
 
@@ -3216,11 +3256,37 @@ class LaptopController:
 
         return self.refresh_apf_side_lock(nearest_forward_level)
 
+    def apf_overtaking_close_turn_command(
+        self,
+        encounter,
+        nearest_obstacle_distance_m,
+        force_angle,
+        surge_speed,
+    ):
+        overtaking_world = "overtaking" in str(
+            getattr(self, "webots_environment", "")
+        ).lower()
+        if (
+            encounter not in {"overtaking", "static_obstacle", "none"}
+            and not overtaking_world
+        ) or nearest_obstacle_distance_m > self.apf_overtaking_close_distance_m:
+            return force_angle, surge_speed
+
+        force_angle = max(
+            abs(float(force_angle)),
+            self.apf_overtaking_close_turn_angle_rad,
+        )
+        heading_offset = abs(wrap_angle(float(self.Yaw) - self.route_heading_rad))
+        if heading_offset < self.apf_overtaking_turn_release_angle_rad:
+            surge_speed = min(surge_speed, self.apf_overtaking_close_turn_speed_m_s)
+        return force_angle, surge_speed
+
     def compute_apf_control(self, t, u_track):
-        if self.apf_primary_encounter_mode() == "crossing":
+        primary_encounter = self.apf_primary_encounter_mode()
+        if primary_encounter == "crossing":
             return self.compute_apf_control_crossing(t, u_track)
 
-        active_params = self.apf_params_for_encounter(self.apf_primary_encounter_mode())
+        active_params = self.apf_params_for_encounter(primary_encounter)
         final_approach = self.final_approach_active()
         if final_approach:
             target_ne = self.goal_ne.copy()
@@ -3243,9 +3309,25 @@ class LaptopController:
 
         virtual_obstacles = self.update_apf_virtual_obstacles()
         obstacles = self.lidar_obstacles + virtual_obstacles
+        nearest_obstacle_distance_m = np.inf
         priority_obstacles = []
         secondary_obstacles = []
         for obstacle in obstacles:
+            obs_pos_body = np.asarray(
+                obstacle.get("centre_body", [np.nan, np.nan]),
+                dtype=float,
+            ).reshape(2)
+            if (
+                not bool(obstacle.get("virtual", False))
+                and np.isfinite(obs_pos_body).all()
+                and obs_pos_body[0] > 0.0
+                and abs(float(np.arctan2(obs_pos_body[1], obs_pos_body[0])))
+                <= np.deg2rad(22.5)
+            ):
+                nearest_obstacle_distance_m = min(
+                    nearest_obstacle_distance_m,
+                    float(np.linalg.norm(obs_pos_body)),
+                )
             if self.apf_obstacle_in_priority_front_sector(obstacle):
                 priority_obstacles.append(obstacle)
             else:
@@ -3333,19 +3415,19 @@ class LaptopController:
         force_angle = wrap_angle(float(np.arctan2(steering_force[1], steering_force[0])))
         force_angle = float(np.clip(force_angle, -self.apf_heading_step_limit_rad, self.apf_heading_step_limit_rad))
 
+        surge_speed = float(
+            active_params.get("constant_descent_speed_m_s", self.apf_constant_descent_speed_m_s)
+        )
+        force_angle, surge_speed = self.apf_overtaking_close_turn_command(
+            primary_encounter,
+            nearest_obstacle_distance_m,
+            force_angle,
+            surge_speed,
+        )
+
         u_cmd = Vector(2)
         u_cmd[1, 0] = np.clip(-self.apf_heading_gain * force_angle / max(self.lastdt, 1e-3), -self.w_max, self.w_max)
-
-        # Use constant-speed (fixed-step) descent during APF avoidance.  The
-        # gradient magnitude no longer changes surge speed; only its direction
-        # changes the commanded heading.
-        u_cmd[0, 0] = float(
-            np.clip(
-                float(active_params.get("constant_descent_speed_m_s", self.apf_constant_descent_speed_m_s)),
-                0.0,
-                self.v_max,
-            )
-        )
+        u_cmd[0, 0] = float(np.clip(surge_speed, 0.0, self.v_max))
 
         if any_repulsion or self.apf_colreg_active or self.apf_side_lock_active:
             if self.apf_colreg_active:

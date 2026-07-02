@@ -10,22 +10,24 @@ from matplotlib import pyplot as plt
 from matplotlib.patches import Circle
 import numpy as np
 
+from webots_collision import collision_detected, collision_outcome_text
+
 
 DEFAULT_FIGURE_OUTPUT_DIR = Path("logs/generated_figures")
 
 
 DEFAULT_DISTANCE_COMPARISON = {
-    "prediction_success": Path("logs/prediction_success"),
-    "no_prediction_success": Path("logs/no_prediction_success"),
-    "no_prediction_failure": Path("logs/no_prediction_failure"),
+    "prediction": Path("logs/prediction_success"),
+    "no_prediction_a": Path("logs/no_prediction_success"),
+    "no_prediction_b": Path("logs/no_prediction_failure"),
     "output": None,
     "safe_distance_m": None,
 }
 
 DEFAULT_DISTANCE_COMPARISON_FALLBACK = {
-    "prediction_success": Path("logs/run_20260617_134958"),
-    "no_prediction_success": Path("logs/run_20260617_134809"),
-    "no_prediction_failure": Path("logs/run_20260617_135121"),
+    "prediction": Path("logs/run_20260617_134958"),
+    "no_prediction_a": Path("logs/run_20260617_134809"),
+    "no_prediction_b": Path("logs/run_20260617_135121"),
 }
 
 
@@ -621,30 +623,30 @@ def set_equal_axis_with_padding(ax, padding_ratio=0.08):
 
 
 def plot_distance_comparison(
-    prediction_success_source,
-    no_prediction_success_source,
-    no_prediction_failure_source,
+    prediction_source,
+    no_prediction_source_a,
+    no_prediction_source_b,
     output_path,
     safe_distance_m,
 ):
     scenario_specs = [
         (
-            "No prediction avoidance failed",
-            no_prediction_failure_source,
+            "No prediction avoidance B",
+            no_prediction_source_b,
             "#d62728",
             "--",
             2.0,
         ),
         (
-            "Prediction avoidance succeeded",
-            prediction_success_source,
+            "Prediction avoidance",
+            prediction_source,
             "#1f77b4",
             "-",
             2.2,
         ),
         (
-            "No prediction avoidance succeeded",
-            no_prediction_success_source,
+            "No prediction avoidance A",
+            no_prediction_source_a,
             "black",
             "-.",
             2.0,
@@ -655,11 +657,12 @@ def plot_distance_comparison(
     summary_rows = []
     plotted_any = False
 
-    for label, source, color, linestyle, linewidth in scenario_specs:
+    for base_label, source, color, linestyle, linewidth in scenario_specs:
         times, distances = read_distance_series(source)
         if len(times) == 0:
             raise ValueError(f"No valid distance samples found in {source}")
 
+        label = f"{base_label} ({collision_outcome_text(source)})"
         ax.plot(
             times,
             distances,
@@ -676,6 +679,7 @@ def plot_distance_comparison(
                 "samples": len(times),
                 "min_time_s": float(times[min_index]),
                 "min_distance_m": float(distances[min_index]),
+                "collision_detected": collision_detected(source),
             }
         )
 
@@ -722,7 +726,10 @@ def plot_log_distance(
         color="#1f77b4",
         linestyle="-",
         linewidth=2.0,
-        label="Distance to nearest obstacle ship",
+        label=(
+            "Distance to nearest obstacle ship "
+            f"({collision_outcome_text(source_path)})"
+        ),
     )
     ax.axhline(
         safe_distance_m,
@@ -760,6 +767,7 @@ def plot_log_distance(
         "samples": len(times),
         "min_time_s": min_time_s,
         "min_distance_m": min_distance_m,
+        "collision_detected": collision_detected(source_path),
     }
 
 
@@ -939,19 +947,25 @@ def main():
     parser.add_argument("--max-predictions", type=int, default=250, help="Maximum predicted trajectories to draw; use 0 to hide them.")
     parser.add_argument("--show-cloud", action="store_true", help="Draw logged LiDAR cloud points from obstacle JSON files.")
     parser.add_argument(
+        "--prediction-run",
         "--prediction-success",
+        dest="prediction_run",
         type=Path,
-        help="CSV log or run directory for the prediction-based successful avoidance case.",
+        help="CSV log or run directory for the prediction-based avoidance case.",
     )
     parser.add_argument(
+        "--no-prediction-run-a",
         "--no-prediction-success",
+        dest="no_prediction_run_a",
         type=Path,
-        help="CSV log or run directory for the no-prediction successful avoidance case.",
+        help="CSV log or run directory for the first no-prediction case.",
     )
     parser.add_argument(
+        "--no-prediction-run-b",
         "--no-prediction-failure",
+        dest="no_prediction_run_b",
         type=Path,
-        help="CSV log or run directory for the no-prediction failed avoidance case.",
+        help="CSV log or run directory for the second no-prediction case.",
     )
     parser.add_argument("--distance-output", type=Path, help="Output PNG path for the distance comparison plot.")
     parser.add_argument("--safe-distance", type=float, help="Safety distance threshold in metres for the distance plot.")
@@ -976,18 +990,18 @@ def main():
 
     using_default_distance_comparison = len(sys.argv) == 1
     if using_default_distance_comparison:
-        args.prediction_success = default_strategy_source("prediction_success")
-        args.no_prediction_success = default_strategy_source("no_prediction_success")
-        args.no_prediction_failure = default_strategy_source("no_prediction_failure")
+        args.prediction_run = default_strategy_source("prediction")
+        args.no_prediction_run_a = default_strategy_source("no_prediction_a")
+        args.no_prediction_run_b = default_strategy_source("no_prediction_b")
         args.distance_output = DEFAULT_DISTANCE_COMPARISON["output"]
         if DEFAULT_DISTANCE_COMPARISON["safe_distance_m"] is not None:
             args.safe_distance = DEFAULT_DISTANCE_COMPARISON["safe_distance_m"]
         missing_sources = [
             (name, path)
             for name, path in [
-                ("prediction_success", args.prediction_success),
-                ("no_prediction_success", args.no_prediction_success),
-                ("no_prediction_failure", args.no_prediction_failure),
+                ("prediction", args.prediction_run),
+                ("no_prediction_a", args.no_prediction_run_a),
+                ("no_prediction_b", args.no_prediction_run_b),
             ]
             if not Path(path).exists()
         ]
@@ -1024,21 +1038,22 @@ def main():
         print(f"Saved {output_path}")
         print(
             f"Distance samples: {summary['samples']}; "
-            f"minimum={summary['min_distance_m']:.3f} m at {summary['min_time_s']:.2f} s"
+            f"minimum={summary['min_distance_m']:.3f} m at {summary['min_time_s']:.2f} s; "
+            f"collision={summary['collision_detected']}"
         )
         return
 
     distance_sources = [
-        args.prediction_success,
-        args.no_prediction_success,
-        args.no_prediction_failure,
+        args.prediction_run,
+        args.no_prediction_run_a,
+        args.no_prediction_run_b,
     ]
     has_distance_sources = any(source is not None for source in distance_sources)
     if args.distance_only or args.distance_output is not None or has_distance_sources:
         if not all(source is not None for source in distance_sources):
             parser.error(
                 "--prediction-success, --no-prediction-success, and --no-prediction-failure "
-                "must be provided together for the distance comparison plot."
+                "(or the corresponding --*-run options) must be provided together."
             )
 
         safe_distance_m = (
@@ -1048,9 +1063,9 @@ def main():
         )
         distance_output = args.distance_output or default_distance_comparison_output_path(figure_output_dir)
         summary_rows = plot_distance_comparison(
-            prediction_success_source=args.prediction_success,
-            no_prediction_success_source=args.no_prediction_success,
-            no_prediction_failure_source=args.no_prediction_failure,
+            prediction_source=args.prediction_run,
+            no_prediction_source_a=args.no_prediction_run_a,
+            no_prediction_source_b=args.no_prediction_run_b,
             output_path=distance_output,
             safe_distance_m=safe_distance_m,
         )
@@ -1058,7 +1073,8 @@ def main():
         for summary in summary_rows:
             print(
                 f"{summary['label']}: samples={summary['samples']}, "
-                f"minimum={summary['min_distance_m']:.3f} m at {summary['min_time_s']:.2f} s"
+                f"minimum={summary['min_distance_m']:.3f} m at {summary['min_time_s']:.2f} s; "
+                f"collision={summary['collision_detected']}"
             )
 
         if args.distance_only or (args.log is None and args.obstacle_log_dir is None):
@@ -1115,7 +1131,12 @@ def main():
         title_parts.append(log_path.name)
     if args.obstacle_log_dir is not None:
         title_parts.append(args.obstacle_log_dir.name)
-    title = "Postprocessed Trajectory Tracking: " + " + ".join(title_parts)
+    collision_source = args.obstacle_log_dir or log_path
+    title = (
+        "Postprocessed Trajectory Tracking: "
+        + " + ".join(title_parts)
+        + f"\n{collision_outcome_text(collision_source)} (Webots ShipObstacle)"
+    )
 
     plot_postprocess(
         robot_points=robot_points,
@@ -1170,7 +1191,8 @@ def main():
             print(f"Saved {distance_output_path}")
             print(
                 f"Distance samples: {summary['samples']}; "
-                f"minimum={summary['min_distance_m']:.3f} m at {summary['min_time_s']:.2f} s"
+                f"minimum={summary['min_distance_m']:.3f} m at {summary['min_time_s']:.2f} s; "
+                f"collision={summary['collision_detected']}"
             )
 
 

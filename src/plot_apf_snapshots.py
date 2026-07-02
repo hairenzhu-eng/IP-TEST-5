@@ -14,6 +14,8 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Ellipse, Patch
 import numpy as np
 
+from webots_collision import collision_outcome_text
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
@@ -366,6 +368,7 @@ def plot_snapshot(
     k_goal,
     k_obstacle,
     quiver_step,
+    run_collision_outcome,
 ):
     payload = snapshot["payload"]
     north_min, north_max, east_min, east_max = bounds
@@ -709,7 +712,8 @@ def plot_snapshot(
         time_text += f" (nearest log sample {sample_time_s:.1f} s)"
     ax.set_title(
         f"APF trajectory snapshot at {time_text}\n"
-        f"mode={mode}, encounter={encounter}"
+        f"mode={mode}, encounter={encounter}; "
+        f"{run_collision_outcome} (Webots ShipObstacle)"
     )
     ax.set_xlabel("East (m)")
     ax.set_ylabel("North (m)")
@@ -787,6 +791,7 @@ def generate_snapshots(
 ):
     run_dir = Path(run_dir)
     snapshots = load_snapshots(run_dir)
+    run_collision_outcome = collision_outcome_text(run_dir)
     selected_indices = select_snapshot_indices(snapshots, interval_s)
     output_dir = (
         Path(output_dir)
@@ -824,6 +829,7 @@ def generate_snapshots(
             k_goal=float(k_goal),
             k_obstacle=float(k_obstacle),
             quiver_step=quiver_step,
+            run_collision_outcome=run_collision_outcome,
         )
         outputs.append(output_path)
     return outputs

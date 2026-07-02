@@ -1,0 +1,1795 @@
+
+
+===== PAGE 1 =====
+
+MEASUREMENT OF FREE SURFACE ELEVATION AND VELOCITY 
+SURROUNDING A SURFACE PIERCING FOIL
+BY
+******
+A THESIS SUBMITTED IN PARTIAL FULFILLMENT OF THE
+REQUIREMENTS FOR THE DEGREE OF
+MASTER OF SCIENCE
+IN
+OCEAN ENGINEERING
+UNIVERSITY OF **** 2016
+
+===== PAGE 2 =====
+
+MASTER OF SCIENCE THESIS 
+OF
+*******
+APPROVED:
+Thesis Committee:
+Major Professor *****
+***
+****
+****
+DEAN OF THE GRADUATE SCHOOL
+UNIVERSITY OF **** 2016
+
+===== PAGE 3 =====
+
+ABSTRACT
+Validation and veriﬁcation of numerical experiments require data with which
+to compare the results. In particular, hybrid methods that involve grid interfaces
+between multiple numerical solutions on submerged boundaries or at the free sur-
+face require volumetric measurements for validation. In this study, two methods
+to obtain a comprehensive data set including volumetric three dimensional, three
+component (3D3C) ﬂuid velocities, free surface proﬁles and drag force are com-
+pared for accuracy and economy. For the ﬁrst method, a NACA 0012 surface
+piercing foil is evaluated at Froude numbers 0 .19, 0.37 and 0.55. Velocity mea-
+surements are obtained using Stereo Particle Image Velocimetry (SPIV) with the
+interrogation plane parallel to the chord line of the foil . Free surface proﬁles are
+obtained using a GoPro camera positioned to observe the intersection of the free
+surface and the laser sheet. Force data is obtained through a load cell mounted
+on the tow carriage. The second method positions the SPIV interrogation plane
+perpendicular to the chord of the foil such that the volume is sliced transversely
+while the foil passes through the plane in time. Surface elevations for this method
+are again measured with a GoPro, mounted to capture the intersection of the laser
+sheet and the free surface. The transverse method is examined at Froude number
+0.37. Results are presented based on the ﬂow ﬁeld statistics and the fundamental
+features of the data sets are compared using dynamic mode decomposition. Com-
+parison between the two methods are made qualitatively, as well as quantitatively
+using RMSE and Dynamic Mode Decomposition. The diﬀerence between the two
+methods is less than 10% RMSE.
+
+===== PAGE 4 =====
+
+ACKNOWLEDGMENTS
+I would like to acknowledge ******
+iii
+
+===== PAGE 5 =====
+
+PREF ACE
+The following work is a product of the authors listed. This thesis is for-
+matted in accordance with the guidelines for a manuscript style thesis. The ﬁrst
+manuscript is in preparation for submission to the Journal of Experiments in Flu-
+ids.
+iv
+
+===== PAGE 6 =====
+
+TABLE OF CONTENTS
+ABSTRACT . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ii
+ACKNOWLEDGMENTS . . . . . . . . . . . . . . . . . . . . . . . . . . iii
+PREF ACE. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . iv
+TABLE OF CONTENTS . . . . . . . . . . . . . . . . . . . . . . . . . . v
+LIST OF TABLES . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . ix
+LIST OF FIGURES . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . x
+MANUSCRIPT
+1 Measurement of Free Surface Elevation and Velocity Sur-
+rounding a Surface Piercing Foil . . . . . . . . . . . . . . . . . . 1
+1.1 Abstract . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 2
+1.2 Introduction . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 2
+1.3 Background . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 3
+1.4 Experimental Setup . . . . . . . . . . . . . . . . . . . . . . . . . 6
+1.4.1 Tow Tank Characteristics . . . . . . . . . . . . . . . . . 8
+1.4.2 Foil Parameters . . . . . . . . . . . . . . . . . . . . . . . 9
+1.4.3 SPIV System Arrangement, Control and Calibration . . . 10
+1.4.4 Free Surface Camera Arrangement, Control, and Cali-
+bration . . . . . . . . . . . . . . . . . . . . . . . . . . 12
+1.4.5 ProAnalyst . . . . . . . . . . . . . . . . . . . . . . . . . 13
+1.4.6 Additional Measurements . . . . . . . . . . . . . . . . . . 14
+1.5 Longitudinal Slicing . . . . . . . . . . . . . . . . . . . . . . . . . 14
+v
+
+===== PAGE 7 =====
+
+Page
+vi
+1.5.1 Experimental Design . . . . . . . . . . . . . . . . . . . . 14
+1.5.2 Approach . . . . . . . . . . . . . . . . . . . . . . . . . . 15
+1.5.3 Image Collection . . . . . . . . . . . . . . . . . . . . . . 16
+1.5.4 Calculations . . . . . . . . . . . . . . . . . . . . . . . . . 17
+1.5.5 Free Surface Elevations . . . . . . . . . . . . . . . . . . . 18
+1.6 Transverse Slicing Method . . . . . . . . . . . . . . . . . . . . . 21
+1.6.1 Calculations . . . . . . . . . . . . . . . . . . . . . . . . . 22
+1.7 Results . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 23
+1.7.1 Longitudinal Slicing . . . . . . . . . . . . . . . . . . . . . 23
+1.7.2 Transverse Slicing . . . . . . . . . . . . . . . . . . . . . . 28
+1.8 Discussion . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 30
+1.9 Conclusions . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 32
+List of References . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 33
+APPENDIX
+A Longitudinal Slicing Set Up and Experiment Execution . . . 36
+A.1 Setting up the Tank . . . . . . . . . . . . . . . . . . . . . . . . . 36
+A.2 Setting up the PIV system . . . . . . . . . . . . . . . . . . . . . 36
+A.3 Setting up the GoPro . . . . . . . . . . . . . . . . . . . . . . . . 37
+A.4 Calibration . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 38
+A.5 Experiment Execution . . . . . . . . . . . . . . . . . . . . . . . 38
+B Longitudinal Slice Elevation Processing Procedures . . . . . . 41
+B.1 Introduction . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 41
+B.2 Creating Frames from Video Files . . . . . . . . . . . . . . . . . 41
+
+===== PAGE 8 =====
+
+Page
+vii
+B.3 Import Video to DaVis . . . . . . . . . . . . . . . . . . . . . . . 41
+B.4 Calibration . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 41
+B.5 Correction . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 42
+B.6 Export from DaVis to ProAnalyst . . . . . . . . . . . . . . . . . 42
+B.7 Establishing Scale and Origin . . . . . . . . . . . . . . . . . . . 42
+B.8 Establishing Tracking Lines . . . . . . . . . . . . . . . . . . . . 43
+B.9 Processing the Elevation Data from ProAnalyst . . . . . . . . . 44
+C Transverse Slicing Set Up and Experiment Execution . . . . . 46
+C.1 Setting up the Tank . . . . . . . . . . . . . . . . . . . . . . . . . 46
+C.2 Setting up the PIV system . . . . . . . . . . . . . . . . . . . . . 46
+C.3 Setting up the GoPro . . . . . . . . . . . . . . . . . . . . . . . . 47
+C.4 Calibration . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 48
+C.5 Experiment Execution . . . . . . . . . . . . . . . . . . . . . . . 48
+D Transverse Slice Elevation Processing Procedures . . . . . . . 51
+D.1 Introduction . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 51
+D.2 Creating Frames from Video Files . . . . . . . . . . . . . . . . . 51
+D.3 Import Video to DaVis . . . . . . . . . . . . . . . . . . . . . . . 51
+D.4 Calibration . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 51
+D.5 Correction . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 52
+D.6 Export from DaVis to ProAnalyst . . . . . . . . . . . . . . . . . 52
+D.7 Establishing Scale and Origin . . . . . . . . . . . . . . . . . . . 52
+D.8 Establishing Tracking Lines . . . . . . . . . . . . . . . . . . . . 53
+D.9 Processing the Elevation Data from ProAnalyst . . . . . . . . . 54
+
+===== PAGE 9 =====
+
+Page
+viii
+E Comparison of Methods Proceedure . . . . . . . . . . . . . . . . 56
+E.1 Introduction . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 56
+E.2 Matlab Script and Function Descriptions . . . . . . . . . . . . . 56
+E.2.1 matrixweave.m . . . . . . . . . . . . . . . . . . . . . . . 56
+E.2.2 DMD FlowField.m . . . . . . . . . . . . . . . . . . . . . 56
+E.2.3 axisscales.m . . . . . . . . . . . . . . . . . . . . . . . . . 56
+E.2.4 DMDLong.m . . . . . . . . . . . . . . . . . . . . . . . . 56
+E.2.5 DMDTransverse.m . . . . . . . . . . . . . . . . . . . . . 57
+E.3 Operational Proceedures . . . . . . . . . . . . . . . . . . . . . . 57
+List of References . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 58
+BIBLIOGRAPHY . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 59
+
+===== PAGE 10 =====
+
+LIST OF TABLES
+Table Page
+1 Experimental Layout, the numbers below the Fr number indi-
+cate the run sequence of the individual experiment. First, Fr
+0.37 was run starting at the centerline of the foil out to a half
+chord length. Second, Fr 0.19 and 0.55 were fully randomized
+in both speed and distance from the foil. . . . . . . . . . . . . . 15
+2 Force in Newtons. The drag coeﬃcient is for drag in the X
+direction based on the chord length of the foil. . . . . . . . . . . 28
+3 Cd for this experiment and extrapolated from Laitone are com-
+pared at corresponding Reynolds numbers. . . . . . . . . . . . . 28
+ix
+
+===== PAGE 11 =====
+
+LIST OF FIGURES
+Figure Page
+1 The Field of View of the SPIV cameras was located from the free
+surface to a depth of over one chord length. The GoPro ﬁeld of
+view was located at the intersection of the laser sheet with the
+free surface and centered on the center of the foils chord length.
+Foil movement is parallel to the X axis. . . . . . . . . . . . . . . 7
+2 The 2D+T method is shown above. This method allows for the
+free surface elevations and ﬂuid velocities to be obtained rapidly.
+The laser sheet and cameras are ﬁxed in postion both relative
+to eachother and the tank. Foil movement is parallel to the X
+axis. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 9
+3 Camera positions for each conﬁguration.The cameras are sepa-
+rated by an angle of approximately 30 degrees. . . . . . . . . . . 11
+4 This screen shot from ProAnalyst shows the arrangement of the
+tracking lines and the free surface. The laser sheet intersecting
+the free surface is the high intensity line of approximatly 10
+pixels in thickness. The vertical lines are the tracking lines which
+track the peak intensity. In this image, the scale is 10.4 pixels
+per mm . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 14
+5 The volume surrounding the foil is sliced to obtain velocities and
+free surface elevations within the plane of the slice. The slices
+are then aggregated to obtain the volumetric average velocities
+with in the volume. . . . . . . . . . . . . . . . . . . . . . . . . . 17
+6 This ﬁgure demonstrates the positioning of the GoPro camera in
+relation to the foil. The camera was mounted just slightly above
+the still water free surface to avoid the camera from interfering
+in the wave ﬁeld. (A)Camera (B)Camera ﬁeld of view (C)Laser
+sheet intersecting the free surface (D) Foil. . . . . . . . . . . . . 19
+7 Raw and corrected images obtained using the camera arrange-
+ment in ﬁgure 6 and calibrated using the DaVis pinhole camera
+model correction. . . . . . . . . . . . . . . . . . . . . . . . . . . 20
+x
+
+===== PAGE 12 =====
+
+Figure Page
+xi
+8 This ﬁgure shows the orientation of the laser plane to the foil as
+well as the location of successive frames taken with the trans-
+verse method. . . . . . . . . . . . . . . . . . . . . . . . . . . . . 21
+9 Non-dimensional velocities for all directional components and
+froude numbers. Velocities are non-dimentionalized by Fr num-
+ber. . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 24
+10 Fr = 0.37. Slices along the chord of the foil, starting at the mean
+free surface and extending to one chord length below the free
+surface. Velocities have been non-dimentionalized by Froude
+number . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 25
+11 Free Surface Elevations . . . . . . . . . . . . . . . . . . . . . . . 27
+12 Transverse Slice Component Velocities. Velocities are non di-
+mentionalized by the Fr number. . . . . . . . . . . . . . . . . . 29
+13 Free surface elevations, non dimentionalized by the average free
+surface height, surrounding a NACA 0012 surface piercing foil
+at Froude number 0.37.The data for this plot was obtained using
+the transverse slicing technique. . . . . . . . . . . . . . . . . . . 29
+14 The most signiﬁcant mode as calculated using DMD. . . . . . . 35
+
+===== PAGE 13 =====
+
+MANUSCRIPT 1
+Measurement of Free Surface Elevation and Velocity Surrounding a
+Surface Piercing Foil
+by James J. Schock and Jason M. Dahl
+To be submitted to the Journal of Experiments in Fluids
+1
+
+===== PAGE 14 =====
+
+1.1 Abstract
+Veriﬁcation of sea keeping prediction programs is typically performed using
+experimentally obtained velocity and free surface elevation data. Traditionally
+data are expensive to obtain due to the need for expensive equipment, a large
+number of experiments required to measure quantities in the volume in question
+or the signiﬁcant processing time involved in calculating the ﬂow properties. This
+paper describes two methods which can be used to obtain both velocity and free
+surface elevations surrounding a surface piercing foil. Both methods use Stereo
+Particle Image Velocimetry to measure the velocity of the ﬂow and an oﬀ the
+shelf digital camera to measure the free surface elevations. The ﬁrst method is
+performed using a vertical laser sheet in plane with the foil. The second method
+rotates the vertical laser sheet such that the foil is orthogonal to the laser sheet.
+The two methods are compared using dynamic mode decomposition and found
+to be substantially signiﬁcant in the primary mode. Root mean square error is
+calculated between the two methods and a 9.6% diﬀerence is found.
+1.2 Introduction
+The wave ﬁeld generated from a translating slender body at the free surface is
+an important component in the evaluation of the drag characteristics of slender
+bodies, such as ships or hydrofoils. This aspect of the generated ﬂow ﬁeld is
+critically important in the veriﬁcation of sea keeping prediction programs, which
+aim to model these physics through computer simulation.
+(Reliquet, 2013) developed a hybrid computational ﬂuid modeling method sim-
+ilar to the hybrid Lattice Boltzmann Potential Flow solver under development at
+the University of Rhode Island (URI) by (OReilly et al., 2015). In order to verify
+the method in Reliquet, data from (Metcalf et al., 2006) was used. In Metcalf,
+2
+
+===== PAGE 15 =====
+
+pressure and surface topography data was collected via pressure taps and wave
+sensors and assembled to describe the characteristic ﬂow surrounding a surface
+piercing foil.
+Although many techniques exist for separately obtaining velocity ﬁeld or free
+surface measurements, one goal of this work is to limit the necessary equipment
+and experimental time needed to obtain an experimental data set using a stereo
+PIV system. Emphasis is placed on using a single laser for all measurements. Two
+methods are proposed and tested. The ﬁrst method utilizes a vertically oriented
+planar ﬁeld of view which is parallel to the chord line of the foil. This view makes
+it possible to slice the volume and obtain 3D3C measurements of velocity and free
+surface elevation with out disturbing the ﬂow with wave probes or other equipment.
+In addition, by using a carriage to carry the SPIV equipment, such that the laser
+sheet and cameras are set a ﬁxed distance, the need to calibrate between separate
+runs is eliminated. Second, a transversely sliced volume method using a 2D+T
+argument assuming a steady ﬂow is explored, which signiﬁcantly reduces the costs
+associated with obtaining the volumetric data set.
+The vertical orientation of the laser sheet is of particular note. Past experiments
+use a horizontally oriented laser sheet to slice the volume. The resulting data is
+then viewed horizontally. For this set of experiments the laser sheet is oriented
+vertically and the data is visualized in the traditional horizontal format. By using
+the vertical orientation it is possible to only use one laser to image both the free
+surface and perform SPIV measurements simultaneously.
+1.3 Background
+In order to verify computational ﬂuid solvers it is necessary to have empirical
+data to compare to the numerical results. Typically force or pressure data is
+3
+
+===== PAGE 16 =====
+
+available and commonly used for comparisons. One problem with using force data
+for veriﬁcation is that it is an integrated quantity in ﬂuid ﬂow. This means that
+force can be a non-unique, forces associated with a particular ﬂow may match the
+computed forces even though the ﬂow ﬁeld may be slightly diﬀerent. This can be
+particularly important in problems where phase is important, such as with free
+surface waves and vortex shedding. One goal of this experiment is to develop a
+data set that includes force on the body, 3D3C velocity surrounding the body, and
+wake elevations.
+The Hybrid Lattice Boltzman Potential ﬂow solver developed in
+(OReilly et al., 2015) utilizes potential ﬂow theory to solve for ﬂow charac-
+teristics in the general domain. Close to the body being evaluated, Lattice
+Boltzman methods are applied. In order to best verify the Hybrid Lattice
+Boltzmann Potential Flow Solver, it is desired to compare both the velocity
+ﬁeld and the surface topography within the overlapping numerical domain in a
+non-invasive manner. Measurements of velocity, free surface elevations, and force
+are obtained simultaneously in order to construct the veriﬁcation data set.
+Traditionally, obtaining the free surface elevation and volumetric velocity mea-
+surements surrounding a surface piercing body require expensive specialized and
+possibly invasive equipment such as wave probes or pitot tubes which can cause
+issues with surface tension. These same methods also require large amounts of
+time devoted to testing in specialized facilities. Some methods split these two
+measurements into two separate problems; above and below the free surface such
+as in (Metcalf et al., 2006). SPIV is a common tool to measure the velocity ﬁeld
+in this case. (Prasad and Adrian, 1992; Prasad, 2000) demonstrate an application
+of SPIV to ﬂuid ﬂows utilizing two cameras and a single light sheet. By tracking
+4
+
+===== PAGE 17 =====
+
+and correlating the particles between two frames, it is possible to determine the
+three component velocity vectors of the observed ﬂow. By using this technique
+and slicing the ﬂow at varying locations in the volume, it is possible to develop a
+volumetric velocity proﬁle. Although there are limitations in doing this, one must
+assume the ﬂow can be time averaged.
+Several techniques are developed which use imaging methods to determine the
+velocity of the free surface and the topography. (Fouras et al., 2006) describes a
+method where an etched glass plate is placed below the free surface and is im-
+aged from above. A reference image is obtained followed by an image of the
+wavy surface. The two images are then compared using a PIV algorithm to de-
+termine the relative displacements of the etchings on the glass plate. A directly
+proportional relationship exists between the relative displacements of the etchings
+and the free surface heights. (Fouras et al., 2008b; Ng et al., 2009) build further
+on the work of (Fouras et al., 2006) by adding a second camera below the ﬂow
+and taking both reference and distorted images simultaneously.(Fouras et al., 2007;
+Fouras et al., 2008a) build on this technique by removing the need for a calibra-
+tion cycle through by the addition of a third paraxial camera and modiﬁed SPIV
+algorithm. By adding a third camera the calibration information is collected simul-
+taneously with the measurement data. For this process to work, it is imperative
+that the third camera is able to image the ﬁeld with minimal distortion.
+(Gomit et al., 2012) used SPIV with three cameras, one located below the water
+channel and two above the water channel. By arranging the laser sheet such that
+the volume is sliced horizontally it is possible to obtain the surface heights, normal,
+and two dimensional velocity of the free surface. (Chatellier et al., ) used the cross-
+correlation of parametric shape and displacement image forms to determine the
+5
+
+===== PAGE 18 =====
+
+three dimensional coordinates of the free surface.
+These techniques focus primarily on measuring the free surface properties, how-
+ever it would expensive to implement these techniques with additional measure-
+ment of the 3-D velocity ﬁeld and forces.
+A more traditional approach is taken by (Metcalf et al., 2006) who measured
+the free surface topography and simultaneous pressure ﬁeld surrounding a surface
+piercing foil using wave gauges and pressure sensors. In (Metcalf et al., 2006),
+a grid of pressure sensors are positioned on a foil to obtain the surface pressures
+acting on the foil. A Pitot-static tube is used to measure upstream surface pressure.
+To measure the free surface topography, three capacitance wire wave gauges are
+mounted on a dynamically positioned carriage. The carriage is moved around the
+foil to record slices of the wave ﬁeld during the experiment. After conducting the
+experiment, the data is compiled into a pressure ﬁeld on the surface of the foil
+and the free surface elevation ﬁeld surrounding the foil. Although this experiment
+measures the free surface elevation and the pressure ﬁeld at the foil surface, it
+does not measure the velocity ﬁeld beyond the surface of the foil. In addition the
+wave gauges and pitot probe are invasive, which can aﬀect the surface elevation
+measurements, particularly for low Fr and Re ﬂows.
+1.4 Experimental Setup
+In order to gain the advantage of a single calibration while obtaining volumetric
+velocities and the elevation of the free surface, a traverse system was designed and
+constructed to ﬁx the relative positions of the cameras and the light sheet used
+for PIV. Using this traverse it was possible to slice the volume vertically in planes
+parallel to the chord of the foil while only requiring a single initial calibration.
+To measure the free surface, a GoPro digital camera was mounted on the drive
+6
+
+===== PAGE 19 =====
+
+carriage at a ﬁxed distance from the laser sheet. The interaction between the free
+surface and the laser sheet results in light scattering which is detected as a high
+intensity light by the GoPro camera. The scatter pattern follows the curvature of
+the free surface and can thus be tracked and measured. The wake proﬁle of the
+foil is assumed to be steady state since the transverse wave ﬁeld is not signiﬁcantly
+time varying. In assuming a steady state process, the data may be time averaged.
+Figure 1 and 3 show a schematic of the ﬁeld of view of each camera used in the
+experiment. Vertical slicing of the velocity ﬁeld parallel to the foil requires that
+multiple experiments must be repeated to obtain a volumetric measurement. This
+can be time consuming and expensive.
+Figure 1: The Field of View of the SPIV cameras was located from the free surface
+to a depth of over one chord length. The GoPro ﬁeld of view was located at the
+intersection of the laser sheet with the free surface and centered on the center of
+the foils chord length. Foil movement is parallel to the X axis.
+7
+
+===== PAGE 20 =====
+
+A second 2D+T method is investigated to further reduce the necessary experi-
+mental time by ﬁxing the cameras and light sheet such that the volume is sliced
+perpendicular to the long direction. By assuming that the ﬂow is steady state, a
+relatively safe assumption for slender bodies, it is possible to treat time as a third
+spatial dimension. To employ this technique, the laser is aligned vertically and in
+an orientation orthogonal to the path of the foil. The foil is then ”driven” through
+the laser sheet and the time series of images is collected. Figure 3 and 2 show the
+relative positions of the foil, laser sheet and cameras used for this method. The
+distance between each image is computed from the frame rate of the camera and
+the forward speed of the foil. This method allows for the experimental test matrix
+for a given Froude number to be reduced to a single experiment. Two experiments
+may be required, however, for an asymmetric body shape.
+1.4.1 Tow Tank Characteristics
+A tow tank with a usable length of 2.6 meters, depth of 0.68 meters and width
+of 0.90 meters is used to conduct the experiments. The tow tank is ﬁtted with an
+automated top carriage which can be programmed to position the foil dynamically
+within the tank. For the purposes of this experiment, the foil is ﬁxed at a zero
+degree angle of attack and shifted transversely from center line out to 0.5 chord
+lengths in increments of 0.036 chord lengths. The carriage is capable of speeds up
+to 0.5 m/s.The sides and bottom of the tow tank are constructed of tempered glass
+and the frame is extruded aluminum. Full details of the tow tank and top carriage
+can be found in (Reilly-Collette, 2014). As part of this investigation, a second
+traverse was designed and ﬁtted to the tow tank to enable the SPIV equipment to
+traverse the length of the tank.
+8
+
+===== PAGE 21 =====
+
+Figure 2: The 2D+T method is shown above. This method allows for the free
+surface elevations and ﬂuid velocities to be obtained rapidly. The laser sheet
+and cameras are ﬁxed in postion both relative to eachother and the tank. Foil
+movement is parallel to the X axis.
+An important feature of this tow tank is the ability to conduct highly repeatable
+experiments. The movement of both carriages is fully automated using servomotors
+with 0.1 mm repeatability, ensuring easily replicated experiments. This allows for
+volumetric measurement of the time averaged velocity ﬁeld.
+1.4.2 Foil Parameters
+For this investigation, a NACA 0012 section with a chord length of 70mm was
+used. The foil was mounted to the top traverse of the tow tank such that 3.5 chord
+lengths of the foil were submerged below the free surface. With the foil submerged
+to this depth the inﬁnite lenghth assumption is used to neglect foil tip eﬀects. The
+9
+
+===== PAGE 22 =====
+
+foil was constructed of aluminum and anodized ﬂat black to reduce the reﬂection
+from laser light, provide a smooth test surface, and avoid corrosion.
+1.4.3 SPIV System Arrangement, Control and Calibration
+The SPIV system used for this investigation is a LaVision SPIV system con-
+sisting of two Phantom V10 high speed cameras, pulsed Nd/Yag laser, timing
+controller, and DaVis 8 software package.
+The high speed cameras used were two Phantom V10 high speed CMOS cameras
+capable of a frame rate of 480hz with a resolution of 2400 x 1800 pixels. The cam-
+eras were mounted in a traditional stereo piv arrangement; on the same plane with
+an angular separation of approximately 30 degrees. Each camera was equipped
+with Nikkon lens mounts and scheimpﬂugs. 3 shows a schematic of the camera
+setup with the ﬁeld of view.
+Two diﬀerent lenses were used, one for each version of the experiment. For the
+longitudinal experiments, Nikkor 50mm f1.2 lenses were used. For the transverse
+experiments, Nikkor 105mm f 2D lenses were utilized. In both cases, the lenses
+were manually focused on the region of interest using a calibration plate.
+A timing controller is used to control the two Phantom cameras as well as the
+laser timing. It is a LaVision HighSpeed controller. An optical trigger is also
+integrated into the timing controller. The trigger was mounted on the rail of the
+PIV system traverse and activated when the cart passed over the trigger. The
+trigger initiated the SPIV imaging acquisition.
+A Photonix model DM30-527PIV pulsed Nd Yag laser which emits 527 nm green
+light and 1053 nm ultra-violet light as used.
+10
+
+===== PAGE 23 =====
+
+Figure 3: Camera positions for each conﬁguration.The cameras are separated by
+an angle of approximately 30 degrees.
+DaVis 8.1 software was used as the primary control interface for the SPIV system
+as well as the initial processing of the ﬂuid velocity ﬁelds. Utilizing the included
+calibration work ﬂow, SPIV images were able to be calibrated using a 3rd order
+polynomial calibration. The GoPro images were calibrated using a pinhole camera
+model calibration included as an option in the workﬂow. The calibration plate used
+for all cameras is a LaVision 204-15. The 204-15 is a two-level plate measuring
+204 mm x 204 mm square, with white marks spaced in 15 mm increments covering
+each of the two levels. There is a 3 mm separation between the two levels.
+11
+
+===== PAGE 24 =====
+
+1.4.4 Free Surface Camera Arrangement, Control, and Calibration
+In order to visualize the wake at a given position, it was necessary to mount a
+camera close to the foil, above the free surface, at an angle that allows for capturing
+the full wave elevation with out obscuring the view of the free surface. In addition,
+for ease of repetition, the camera must be ﬁxed in relation to the laser sheet.
+Ideally the laser sheet should be as thin as possible to provide better resolution for
+the free surface measurements, however, in order to perform SPIV simultaneously
+it is necessary to have some thickness to the laser sheet. For this set of experiments
+the laser sheet was set to a thickness of approximately 2.0 mm.
+A GoPro Hero4 Black edition was used to visualize the free surface . This small
+high deﬁnition camera is capable of frame rates of up to 240 Hz. For this set of
+experiments the camera was set to record images at 240 Hz with an image size of
+1280 by 720 pixels using the option for a ”narrow” view angle. Triggering for this
+camera was performed using the GoPro iPhone application via bluetooth.
+In order to calibrate the GoPro camera, a set of images showing the LaVision
+204-15 calibration plate was recorded. These images were used by DaVis to com-
+plete a calibration using the built in pinhole camera model. In order to avoid
+changing the location of the camera a wireless bridge was established using the
+built in WiFi adapter of the GoPro. This allowed the images to be downloaded to
+the processing computer after each experiment.
+The GoPro images were synced to the velocity data in two diﬀerent manners.
+The longitudinally sliced free surface measurements were synced to the velocity
+measurements by locating the foil position in the images collected while the laser
+sheet was on the center line of the foil. Using this information ProAnalyst tracking
+12
+
+===== PAGE 25 =====
+
+lines, described below , were developed relative to this zero position. The same
+tracking lines were used for each slice to maintain the known position of the foil.
+For the Transversely sliced data, the image frame where the leading edge of the
+foil crosses the laser plane is set to the zero location. Using the frame rate of the
+camera and the foil speed, the distance for subsequent frames is calculated and
+applied to the topography measurements.
+1.4.5 ProAnalyst
+Motion tracking software, ProAnalyst, was used to determine the location of
+the free surface in images collected by the free surface camera. ProAnalyst can be
+used to track both 1−D and 2−D movement within a video. For the purpose of
+this investigation only 1−D tracking is necessary. In 1−D tracking mode, lines
+are placed on the video and set to track the characteristics of the object which is
+of interest.
+The free surface appears in each frame of the video as a line of peak intensity
+where the laser sheet intersects the free surface. This interface is approximately 7
+to 10 pixels thick and directly proportional to the thickness of the laser sheet. To
+determine the free surface location, each tracking line was set to detect the location
+of highest intensity along the tracking line. Figure 4 shows how the tracking lines
+are arranged along the high intensity laser sheet - free surface intersection. In order
+to establish a baseline for the still water free surface, a tracking line was placed
+forward of the foil in the still water region.ProAnalyst calibration was performed
+using calibrated marks placed on each frame of the video by DaVis. Using the
+calibration marks, ProAnalyst can establish a relationship between pixel and world
+coordinates, in this case 10.4 pixels per mm. The tracking function will locate the
+highest intensity pixel along each tracking line, however, because the free surface
+13
+
+===== PAGE 26 =====
+
+is between 7-10 pixels in thickness this leads to variability in the free surface on
+the order of 0.5 mm.
+Figure 4: This screen shot from ProAnalyst shows the arrangement of the tracking
+lines and the free surface. The laser sheet intersecting the free surface is the high
+intensity line of approximatly 10 pixels in thickness. The vertical lines are the
+tracking lines which track the peak intensity. In this image, the scale is 10.4 pixels
+per mm
+1.4.6 Additional Measurements
+In addition to the free surface elevation and velocity data, force measure-
+ments, foil position, and velocity were also collected for each experiment. Force
+measurements were made using a 6-axis ATI Gamma force sensor, model SI-130-
+10, mounted between the foil and top carriage. Position and velocity were recorded
+using the feed back from the motion control system and Labview. Velocity was
+also independently measured using a Unimeasure HX-VP1010-200-E1-L7M spring
+potentiometer.
+1.5 Longitudinal Slicing
+1.5.1 Experimental Design
+As a free surface ﬂow with a long slender body, Fr and Re are the dominant
+non-dimensional parameters. The Froude number, as deﬁned in equation 1, is
+necessary to scale model free surface ﬂows. In equation 1, U is the characteristic
+velocity of the ﬂow,g represents standard gravity, andl is the characteristic length
+of the body, in this case the chord length. Froude numbers 0.19, 0.37, and 0.55
+were chosen in order to provide a comparison to the Froude numbers used in
+(Metcalf et al., 2006), although a diﬀerent NACA section was used. Experiments
+14
+
+===== PAGE 27 =====
+
+were conducted in two sets. First, Fr 0.37 experiments were conducted in sequence
+from 0 to one half chord length between the slice and foil in increments of 0.035
+chord lengths. Second, Fr 0.19 and 0.55 were completely randomized for both Fr
+and distance from foil. Table 1 is the experimental layout used. The numbers
+under each froud number indicate the number of the experiment.
+Fr = U√g∗l (1)
+Table 1: Experimental Layout, the numbers below the Fr number indicate the
+run sequence of the individual experiment. First, Fr 0.37 was run starting at the
+centerline of the foil out to a half chord length. Second, Fr 0.19 and 0.55 were fully
+randomized in both speed and distance from the foil.
+Froude Number
+Distance (mm) 0.19 0.37 0.55
+0.0 19 1 17
+2.5 23 2 10
+5.0 1 3 18
+7.5 8 4 5
+10.0 14 5 24
+12.5 28 6 13
+15.0 26 7 2
+17.5 11 8 3
+20.0 7 9 7
+22.5 12 10 21
+25.0 29 11 4
+27.5 6 12 20
+30.0 30 13 25
+32.5 22 14 27
+35.0 15 15 16
+1.5.2 Approach
+A time resolved 3-D velocity ﬁeld is diﬃcult to measure with out a tomographic
+PIV system or comprably expensive technology. For this reason, it was necessary to
+make 2-D measurements and then reconstruct the 3-D ﬁeld. In order to reconstruct
+15
+
+===== PAGE 28 =====
+
+the volume from the slices it is assumed that the phenomena surrounding the foil
+are steady state and that separation of the wake from the foil is minimal. Figure
+5 shows the orientation of the slices and foil as well as a sample of reconstructed
+data. As mentioned in section 1.4.1 the tow tank is capable of highly repeatable
+experiments. This allows the volume to be ”sliced” at speciﬁc distances from the
+center line of the foil. A similar technique is used in (Metcalf et al., 2006) to obtain
+the free surface elevations. In the Metcalf paper, a wave gauge was dynamically
+positioned in the wave ﬁeld during the experiment. By averaging free surface
+heights in time, Metcalf was able to reconstruct the wave ﬁeld. The longitudinal
+slicing method used is similar, in that the volume is sliced by the SPIV plane of
+view, averaged in time, and assembled with successive experiments to represent
+the 3-D volume surrounding the foil.
+1.5.3 Image Collection
+Each experiment followed the same procedure. First, the SPIV system, free
+surface camera, and control computer were programmed and placed in the ”ready”
+mode. Once the seeding in the tank was adequate and the free surface was calm,
+the experiment commenced. The foil was set to accelerate using a half second
+ramp function, hold a steady speed, then decelerate using a half second inverse
+ramp function. SPIV and free surface camera systems were triggered remotely as
+the foil crossed the optical sensor which was located in the steady state zone of the
+speed proﬁle. After the foil ﬁnished each run, the imaging systems downloaded
+all of the recorded data for archiving. Simultaneously, the foil would reset to the
+original position. Each experiment cycle lasted approximately 20 minutes, due to
+the download speed for the SPIV data and the necessity to wait for the tank to
+calm to a still water condition.
+16
+
+===== PAGE 29 =====
+
+Figure 5: The volume surrounding the foil is sliced to obtain velocities and free
+surface elevations within the plane of the slice. The slices are then aggregated to
+obtain the volumetric average velocities with in the volume.
+1.5.4 Calculations
+DaVis 8.1 software by LaVision was used to process the collected images and
+develop average velocity ﬁelds. Images were corrected using the calibration data
+obtained during the experimental set up. The SPIV calculation is performed using
+a 48 x 48 pixel square interrogation panel followed by a 32 x 32 pixel square
+secondary interrogation panel to determine the velocity ﬁeld vector. The time
+average and standard deviation are calculated for the vector ﬁeld based on the
+entire series of images. The ﬁnal result yields a 2-D vector ﬁeld of average velocities
+at a particular distance from the center line of the foil. By combining all of the
+slices performed at a speciﬁc Froude number it is possible to construct a three
+17
+
+===== PAGE 30 =====
+
+dimensional average velocity ﬁeld surrounding one side of the foil. This same
+process is followed for all three of the selected Froude numbers.
+In (Willert and Gharib, 1991) the accuracy of PIV measurements is quanti-
+ﬁed based on the interrogation window size and the number of seed parti-
+cles present in the window. Based on the PIV algorithm characterization of
+(Willert and Gharib, 1991) it is possible to make a conservative estimate of the
+error present in the PIV measurements. (Willert and Gharib, 1991) use an inter-
+rogation window of 32 by 32 pixels to obtain the information and plot the RMS
+ﬂuctuation as a function of seeding density per window. In the experiments in
+this paper, a ﬁnal interrogation window of 32 by 32 pixels with an average seeding
+density of 6 particles per window. At this density, a vertical RMS ﬂuctuation of
+0.013 pixels and a horizontal ﬂuctuation of 0 .026 pixels is estimated. To increase
+the number of computed vectors, four processing passes were conducted on each
+set of images. The ﬁrst two processing passes were made with an interrogation
+window size of 48 pixels square. The second two passes were 32 pixels square and
+the interrogation windows were overlapped by 50% in all passes allowing for more
+velocity vector calculations per image. In the calibration of the longitudinally
+sliced data, 1.0mm is equal to 8 pixels. This translates to a theoretical variability
+of±2.08×10−4 m/s in the horizontal direction and±1.04×10−4 m/s in the vertical
+direction, using the estimates in algorithm error from (Willert and Gharib, 1991).
+1.5.5 Free Surface Elevations
+In order to obtain free surface measurements based on tracking the intersection
+of the free surface and the laser sheet, the SPIV images cannot be used since the
+curvature of the free surface combined with the perspective of distortion of the
+cameras results in regions where the near free surface blocks the view of the laser
+18
+
+===== PAGE 31 =====
+
+intersection. By mounting the camera just above the still water free surface, at an
+approximate 30 ◦ angle behind the foil and ﬁxed in reference to the laser sheet it
+is possible to obtain a clear image of the entire wave proﬁle. Figure 6 illustrates
+the location of the camera in relation to the foil. Experiments are conducted in
+a dark room, where the only light present is the laser sheet, such that there is a
+very prominent line which is easily recorded by the camera as seen in Figure 7a.
+Figure 6: This ﬁgure demonstrates the positioning of the GoPro camera in relation
+to the foil. The camera was mounted just slightly above the still water free surface
+to avoid the camera from interfering in the wave ﬁeld. (A)Camera (B)Camera ﬁeld
+of view (C)Laser sheet intersecting the free surface (D) Foil.
+The video of the free surface was trimmed such that only the wave proﬁle was
+shown to reduce ﬁle size and speed the processing of images. The video was then
+separated into individual frames and loaded into DaVis. The images were corrected
+19
+
+===== PAGE 32 =====
+
+(a) Raw image
+(b) Corrected image
+Figure 7: Raw and corrected images obtained using the camera arrangement in
+ﬁgure 6 and calibrated using the DaVis pinhole camera model correction.
+by using the calibration information calculated based on the methods described in
+section 1.4.4. To ensure that the calibration was accurate, the length of the foil in
+the image was compared to the actual chord length of the foil. A geometric mask
+was used to isolate the free surface proﬁle from the surrounding image. ProAnalyst
+was then used to track the free surface as described in section 1.4.5. An example
+of the calibrated image can be seen in Figure 7b.
+The free surface measurements were collected in slices, similar to the method
+used to collect the velocity measurements because the laser was moving. To estab-
+lish the free surface position at the location of the slice, each tracking line height
+was averaged over all of the frames for that slice. The free surface was recon-
+structed by plotting each average height relative to the foil position which was
+determined from the slice along the center line of the foil. By using this method
+20
+
+===== PAGE 33 =====
+
+and aggregating all 15 slices, it is possible to recreate the free surface topography
+as shown in Figure 11.
+1.6 Transverse Slicing Method
+A second method was investigated with the light sheet oriented perpendicular to
+the chord line of the foil as seen in ﬁgure 8. By orienting the sheet in this direction
+and assuming the ﬂuid ﬂow is steady, the foil passing through this sheet will behave
+like a 2D+T experiment, where the third spatial dimension is reconstructed from
+time, frame rate and foil velocity. By imaging the phenomenon in this manner
+it is possible to obtain the full velocity ﬁeld and elevations in one experiment,
+signiﬁcantly reducing the cost of obtaining this information.
+Figure 8: This ﬁgure shows the orientation of the laser plane to the foil as well as
+the location of successive frames taken with the transverse method.
+21
+
+===== PAGE 34 =====
+
+Transverse slicing required that the SPIV cameras be placed at the end of the
+towtank, positioned such that they are at an approximate 20 deg angle away from
+the path of the foil. This also required the foil to be moved 5 .0 cm oﬀ of center
+away from the cameras. The laser sheet was then positioned in the tank such that
+it intersected the path of the foil at the focal length of the camera lenses. The
+laser sheet intersected the path of the foil at a 90 deg angle.
+To capture the free surface, the GoPro was aﬃxed to the side of the tank using
+a suction cup mount and ﬂexible arm. This allowed the camera to be ﬁxed relative
+to the laser sheet but not interfere with the movement of the foil or track. The
+camera was positioned to look forward, toward the foil and laser sheet intersection.
+This allowed the collection of one side of the foil and resulting wake proﬁle.
+One challenge of this method is that the seed particles are at rest to start and
+the disturbance caused by the foil is minimal. To overcome this, the frame rate
+of the SPIV cameras was increased to 1094 hz to better capture the displacement
+of the particles. Seeding density was similar to that of the longitudinal method.
+For the transverse slice experiments, a Froude number of 0.37 was used. It is also
+important to note that in this orientation the U velocities are being measured by
+the stereo calculation, as opposed to the W velocities in the longitudinally sliced
+data.
+1.6.1 Calculations
+Utilizing DaVis 8.1, image sequences were pre-processed in the same manner as
+the longitudinally sliced experiments. It was necessary to reduce the sample rate
+of the collected images by a factor of 3 based on the displacement of the particles
+in each frame. At the full frame rate, the displacement of the particles was not
+large enough to provide an accurate velocity calculation. A ﬁrst pass window size
+22
+
+===== PAGE 35 =====
+
+of 64 x 64 pixels with 50% overlap was used. The two ﬁnal passes were made with
+windows of 48 x 48 pixels and 50% overlap. For this experiment, the average and
+rms velocities were not calculated because time is used to reconstruct the third
+spatial dimension for the velocity ﬁeld assuming a steady ﬂow. The time series of
+images was then stitched together to recreate the volume in question. Each image
+is separated by a distance calculated by equation 2.
+δd = U
+n where n = framerate (2)
+The transversely sliced elevation calculations were performed in the same manner
+to the longitudinally sliced measurements.
+1.7 Results
+1.7.1 Longitudinal Slicing
+The component velocities U, V, and W resulting from the longitudinal slicing
+method for all three Fr are shown in ﬁgure 9. U velocity for all Fr show a region
+of increased speed at the location of maximum thickness as expected. V velocities
+indicate velocities in the downward direction from the leading edge of the foil
+transitioning to upward velocities at the trailing edge. W velocities show that the
+ﬂuid is moving outward from the foil at the leading edge, and toward the foil at
+the trailing edge.
+In addition to analyzing velocity near the free surface it is also possible to slice
+the data at various locations along the span of the foil. Figure 10 shows the U
+velocity at several consecutive slices starting at just above the free surface to one
+chord length below.
+23
+
+===== PAGE 36 =====
+
+Fr = 0.19
+U
+0
+0.2
+0.4
+V
+0
+0.2
+0.4z/c
+W
+-2 -1.5 -1 -0.5 0 0.5
+x/c
+0
+0.2
+0.4
+Fr = 0.37
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+Fr = 0.55
+0.8
+1
+1.2
+-0.1
+-0.05
+0
+0.05
+Longitudinal Slicing,y/c = -0.334
+-2 -1.5 -1 -0.5 0 0.5
+x/c
+-0.1
+0
+0.1
+Figure 9: Non-dimensional velocities for all directional components and froude numbers. Velocities are non-dimentionalized
+by Fr number.
+24
+
+===== PAGE 37 =====
+
+U
+0
+0.5
+V W
+y/c = -0.134
+0
+0.5 y/c = -0.162
+0
+0.5 y/c = -0.191
+z/c
+0
+0.5 y/c = -0.305
+0
+0.5 y/c = -0.391
+0
+0.5 y/c = -0.591
+0
+0.5 y/c = -0.791
+-2 -1 0 1
+ 
+0
+0.5
+0.8 1  1.2
+-2 -1 0 1
+x/c
+-0.12 0    0.06 
+y/c = -0.991
+-2 -1 0 1
+ 
+-0.15 0    0.15 
+Figure 10: Fr = 0.37. Slices along the chord of the foil, starting at the mean free surface and extending to one chord length
+below the free surface. Velocities have been non-dimentionalized by Froude number
+25
+
+===== PAGE 38 =====
+
+The compiled free surface measurements are shown in ﬁgure 11. At each Fr
+the wake proﬁle expected of a slender body is observed and the elevations are of
+reasonable proportions relative to the size of the foil. Observations of the free
+surface disturbance are comparable in shape to the measurements obtained in
+ﬁgure 5 of (Metcalf et al., 2006). Metcalf uses a NACA 0024 foil and therefore the
+magnitudes of the free surface can’t be directly compared, however, the general
+wake patterns can be expected to show resemblance to each other.
+Table 2 shows the time averaged drag force. The drag coeﬃcent (Cd) was
+calculated using Equation 3 for each froude number as well. In (Laitone, 1997) the
+Cd for a NACA 0012 is provided for a range of Re ranging from 20 , 700≤ re≤
+64, 000 and a straight line approximation is provided as Equation 4. Using 4 the
+Cd at the appropriate Re may be extrapolated from data presented in ﬁgure 6 of
+(Laitone, 1997). Table 3 compares the extrapolated Cd of Laitone to those of this
+experiment. As seen in Table 3 there is some diﬀerence between (Laitone, 1997)
+and this experiment. This diﬀerence is present for two reasons. First, the force
+sensor used in this experiment is rated to measure upto 130 newtons at a resolution
+of 1/40 N resolution. The measurements made during this experiment are at the
+very low end of its range which will introduce error in the form of noise to the
+force readings. The second reason for the diﬀerences, is due to the low Reynolds
+number. Existing data at Reynolds numbers lower than 10 × 104 could not be
+found, and thus, no direct comparison can be made.
+Cd = Fx
+1
+2U 2SC
+where S = span length and C = chord length (3)
+Cd = 0.11Re−0.125 (4)
+26
+
+===== PAGE 39 =====
+
+Figure 11: Free Surface Elevations
+27
+
+===== PAGE 40 =====
+
+Table 2: Force in Newtons. The drag coeﬃcient is for drag in the X direction
+based on the chord length of the foil.
+Froude Number
+Mean Force 0.19 0.37 0.55
+Fx 0 .0112 0 .0118 0 .0273
+Cd 0 .0339 0 .0095 0 .0100
+Table 3: Cd for this experiment and extrapolated from Laitone are compared at
+corresponding Reynolds numbers.
+Drag Coeﬃcient
+Froude Number 0.19 0.37 0.55
+Reynolds Number 1 .1288× 103 2.1851× 103 3.2407× 103
+This Experiment 0 .0339 0 .0095 0 .0100
+Laitone 0 .0457 0 .0421 0 .0400
+1.7.2 Transverse Slicing
+The component velocities U, V, and W resulting from the transverse slicing
+method are shown in ﬁgure 12. This plot oﬀers greater resolution in all directions
+due to the increased frame rate of the image collection. U velocities (chord-wise
+direction) are shown slowing at the front of the foil, increased along the chord,
+returning to free stream velocity at the trailing edge and leaving an unsteady wake.
+V velocity (span-wise direction, in and out of plot plane) are shown positive in front
+of the foil, negative along the chord and rising in the wake. W velocity (orthogonal
+to the chord) demonstrates the ﬂuid moving away from the foil initially and then
+ﬁlling in around the foil toward the trailing edge. There is more variability in
+the W velocity measurements because the W dimension corresponds to the stereo
+calculation. All of these observations are what would be expected from this foil
+geometry at this Froude number.
+28
+
+===== PAGE 41 =====
+
+U Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+0.8
+0.9
+1
+1.1
+V Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+-0.05
+0
+0.05
+Transverse Slicing, Fr = 0.37, y/c = -0.334
+W Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+-0.1
+0
+0.1
+Figure 12: Transverse Slice Component Velocities. Velocities are non dimention-
+alized by the Fr number.
+Elevation measurements obtained using the transverse slicing method are
+promising. Figures 13 show the elevations observed. Qualitatively the plots agree
+with velocity measurements and demonstrate an elevated zone at the leading edge,
+depressed surface elevations along the chord and ﬁnally the elevation returning to
+that of surrounding free surface.
+Free Surface Elevation, Fr = 0.37
+-1.2 -1 -0.8 -0.6 -0.4 -0.2 0
+x/c
+0
+0.1
+0.2
+0.3
+0.4
+0.5y/c
+-0.1
+-0.05
+0
+Figure 13: Free surface elevations, non dimentionalized by the average free surface
+height, surrounding a NACA 0012 surface piercing foil at Froude number 0.37.The
+data for this plot was obtained using the transverse slicing technique.
+29
+
+===== PAGE 42 =====
+
+1.8 Discussion
+Ideally the longitudinal and transverse methods would yield high resolution, ac-
+curate and precise results for both velocity and free surface elevation. Two methods
+are used to compare the two experimental sets. First a qualitative comparison is
+made through direct comparison. Figures 9 and 12 can be compared to observe
+that similarities are present between the two methods. In both methods the ve-
+locities follow accepted patterns for ﬂow over a slender body. The diﬀerence is in
+the resolution of the measurement. In the longitudinally sliced data, W velocities
+are a challenge to resolve due to the orientation of the imaging plane as well as the
+fact that they are the smallest in magnitude. In the transversely sliced data, U
+velocity becomes the more challenging component; however, the eﬀects are oﬀset
+due to the greater magnitude of the velocity. Also the direct relation to the Froude
+number allows the error to be more easily assessed and accounted for.
+Diﬀerences also exist in the SPIV processing of the velocity ﬁelds. The longitu-
+dinally sliced data has a ﬁnal processing window of 32 by32 square pixels and the
+transverse sliced data was processed with a ﬁnal window size of 48by48 square pixel
+size, both with a 50% overlap in window. According to (Willert and Gharib, 1991)
+window size does not have a direct eﬀect on accuracy, however, the particle density
+in the image does. As the seeding is similar for each data set, the larger window
+size of the transverse data set allows for more particles to be present in each in-
+terrogation window, which results in less error. To quantitatively compare the
+two methods, the root mean square error (RMSE) was calculated using equation 5
+where L denotes the longitudinal sliced data, T denotes transverse data and N is
+the total number of data points. U, V, and W are the component velocities with
+L and T indicating the longitudinally or transverely sliced data point respectively.
+The results of the calculations show an RMSE equal to 9 .65%.
+30
+
+===== PAGE 43 =====
+
+RMSE =
+√
+Σ(UT−UL)2 + Σ(VT−VL)2 + Σ(WT−WL)2
+N (5)
+In addition to better resolution in the component velocities, there is a diﬀerence
+in spatial resolution between the two methods. The longitudinal slices were taken
+in increments of 0.036∗CL (where CL = Chord Length) from the foil where as the
+transverse method resolves the entire volume in increments of 0.014∗CL which is
+limited by frame rate.
+A third diﬀerence in the data is that the longitudinally sliced data is time inde-
+pendent. The imaging sequence obtained through the longitudinal slices measured
+a steady state time invariant phenomenon. The average of the SPIV series was
+then taken and that result was used to obtain the velocity proﬁle. For the trans-
+verse slicing data, the imaging series is time dependent and each frame of data is
+observing a time dependent evolution of the ﬂow ﬁeld.
+Since one data set is time averaged and one data set is time dependent, we want
+to measure whether the underlying ﬂow structures of the two data sets are the same.
+To do this, we use dynamic mode decomposition. (Schmidt, 2010) calculates the
+eigenvalues of the approximated evolution matrix that describes how a time series
+moves from one snapshot to the next. First the component velocities are assembled
+into a matrix (V N
+1 ) containing the 3D3C velocities as seen in equation 6 where N
+references the snapshot and M references the point with in the snapshot. Then,
+two comparison matrices are assembled as described by equation 7 and 8. Using
+the two comparison matrices QR decomposition is applied and the companion
+matrix S is found. Eigenvalues and vectors are calculated from S and then plotted.
+The mode shape which exists only in the real domain is the primary and most
+31
+
+===== PAGE 44 =====
+
+important mode shape.
+This method allows the comparison of the mechanical processes occurring in the
+ﬂow ﬁelds as they vary in time. For the 2D+T measurements DMD is applied
+directly. In order to apply this method to the longitudinally sliced data snapshots
+of the volume were taken along the Z axis. To consider the methods to be of
+similar quality, the mode shapes present in each must be suﬃciently similar in
+pattern as well as in magnitude. As seen in Figure 14 the mode shapes do share
+similar shapes as well as magnitudes to each other and can be considered to be
+measuring the same phenomenon.
+υ1 =
+
+
+U N
+M
+V N
+M
+W N
+M
+
+ (6)
+V N
+1 ={v1,v 2,v 3...vN −1} (7)
+V N −1
+2 ={v2,v 3,v 4...vN} (8)
+Based on the results of both methods, the 2D+T method provides the best for an
+economical measurement of free surface elevations and 3D3C velocities surround-
+ing a surface piercing foil. The longitudinal method, although similarly accurate,
+requires many more individual experiments and corresponding processing time.
+1.9 Conclusions
+SPIV is a very powerful tool to obtain volumetric velocities of ﬂuids, how-
+ever the expense of such measurements is prohibitive for many applications. By
+changing the orientation of the SPIV ﬁeld of view from horizontal to vertical, it is
+possible to reduce the expense by eliminating the need to re-calibrate the system
+32
+
+===== PAGE 45 =====
+
+before each individual slice of the experiment. The results obtained by this experi-
+ment show that by using a vertically oriented laser sheet, parallel to the chord line
+of the foil, it is possible to obtain a robust and accurate measurement with only
+one calibration of the cameras.
+Even greater economy can be found by slicing the volume transversely. The
+transverse method allowed the number of experiments to be reduced to one in this
+case. In the event that an angle of attack or asymmetrical body were to be used,
+two experiments would be needed, one for each side of the body. The reduction
+of the number of experiments brings a signiﬁcant savings in time and computing
+expense.
+The longitudinal method is useful for measuring time averaged data when the
+body under investigation is symmetrical and the ﬂow is steady with no separa-
+tion. The transverse method will allows for a more economical representation of
+the ﬂuid volume as only one or two experiments are required to determine the
+velocities through out the volume. If the longitudinal method is used on an asym-
+metrical body the number of experiments and processing time required to develop
+the volume is doubled as SPIV must be carried out on both sides of the body.
+List of References
+Chatellier, L., Jarny, S., Gibouin, F., and David, L. Stereoscopic measurement
+of free surface ﬂows. In ICEM 14 - 14th International Conference on Experi-
+mental Mechanics, volume 6, page 8. EPJ Web of Conferences.
+Fouras, A., Hourigan, K., Kawahashi, M., and Hirahara, H. (2006). An improved,
+free surface, topographic technique. Journal of Visualization .
+Fouras, A., Jacono, D. L., and Hourigan, K. (2008a). Target-free stereo piv: a
+novel technique with inherent error estimation and improved accuracy.
+Fouras, A., JDusting, J., and Hourigan, K. (2007). A simple calibration technique
+for stereoscopic particle image velocimetry.
+33
+
+===== PAGE 46 =====
+
+Fouras, A., Lo Jacono, D., Sheard, G. J., and Hourigan, K. (2008b). Measurement
+of instantaneous velocity and surface topography of a cylinder at low reynolds
+number. Journal of Fluids and Structures , 24(8):1271–1277.
+Gomit, G., Calluaud, D., Chatellier, L., and David, L. (2012). Free surface mea-
+surement by stereo-refraction.
+Laitone, E. (1997). Wind tunnel tests of wings at reynolds numbers below 70,000.
+Metcalf, B., Longo, J., Ghosh, S., and Stern, F. (2006). Unsteady free-surface wave-
+induced boundary-layer separation for a surface-piercing naca 0024 foil: Tow-
+ing tank experiments. Journal of Fluids and Structures , 22(1):77–98. Times
+Cited: 9 10.
+Ng, I., Kumar, V., Sheard, G. J., Hourigan, K., and Fouras, A. (2009). Experimen-
+tal study of instantaneous measurement of velocity and surface topography in
+a wake of the circular cylinder at low reynolds number.
+OReilly, C., Grilli, S., Dahl, J., Banari, A., Janssen, C., Schock, J., and Uberrueck,
+M. (2015). A hybrid naval hydrodynamic scheme based on an eﬃcient lattice
+boltzmann method coupled to a potential ﬂow solver.
+Prasad, A. K. (2000). Stereoscopic particle image velocimetry. Experiments in
+Fluids, 29:103–116.
+Prasad, A. K. and Adrian, R. J. (1992). Stereoscopic particle image velocimetry
+applied to liquid ﬂows. Experiments in Fluids , 15:49–60.
+Reilly-Collette, M. I. (2014). Prediction method of the vortex induced vibration
+of a one degree-of-freedom spring-mass system.
+Reliquet, G. (2013). Simulation num´ erique de l’interaction houle/car` ene par cou-
+plage d’une m´ ethode spectrale hos avec un algorithme de capture d’interface.
+Schmidt, P. J. (2010). Dynamic mode decomposition of numerical and experimen-
+tal data.
+Willert, C. E. and Gharib, M. (1991). Digital partical image velocimetry. Experi-
+ments in Fluids .
+34
+
+===== PAGE 47 =====
+
+U Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+0.6
+0.8
+1
+V Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+-0.1
+-0.05
+0
+Longitudinal Slicing, Fr = 0.37, Most Prominent Mode
+W Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+-0.2
+0
+0.2
+(a) Longitudinally Sliced Data
+U Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+0.6
+0.8
+1
+V Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+-0.1
+-0.05
+0
+Transverse Slicing, Fr = 0.37, Most Prominent Mode
+W Velocity
+-2 -1.5 -1 -0.5 0 0.5 1
+x/c
+0
+0.2
+0.4z/c
+-0.2
+0
+0.2 (b) Transversely Sliced Data
+Figure 14: The most signiﬁcant mode as calculated using DMD.
+35
+
+===== PAGE 48 =====
+
+APPENDIX A
+Longitudinal Slicing Set Up and Experiment Execution
+A.1 Setting up the Tank
+In order to set up the tank do the following:
+1. Clean and ﬁll tank with fresh water to the desired level.
+2. Install Foil to load cell.
+3. Home all axis of the tank drive system using the homing routine on the
+control computer.
+4. Seed the tank with particles, for this experiment 50 micron particles were
+used.
+A.2 Setting up the PIV system
+1. Phantom Cameras should be mounted on the cross arm of the trolley. They
+should be close together and pointed toward the same ﬁeld of view.
+2. The laser head should be positioned on the breadboard of the trolley.
+3. The laser sheet should be adjusted so that it is slicing the tank longitudinally.
+The laser should be positioned such that the laser sheet follows the center
+line of the foil.
+4. The trigger switch that is mounted to the side of the tank should be posi-
+tioned such that it is triggered after the foil reaches steady state velocity.
+5. Connect the PIV cameras, Laser head, timing controller, and PIV computer
+as instructed by the LaVision manual.
+36
+
+===== PAGE 49 =====
+
+6. Mount the calibration plate so that the laser sheet is in plane with the front
+of the plate and the the plate is located in the same location as the center
+line of the foil.
+7. Start DaVis 8.0 and choose the record setting, enable both cameras and then
+choose ”live mode”.
+8. Use the calibration plate to adjust the cameras so that they are imaging the
+same area. Do not move the calibration plate, it is important for the next
+part of the set up.
+A.3 Setting up the GoPro
+1. Prior to setting up the camera, download and install the GoPro app onto
+a smart phone. This will allow you to view the camera image prior to the
+testing as well as trigger the camera during testing. The GoPro website
+www.gopro.com has full instructions and information on how to download,
+install, and connect the camera to a smart phone.
+2. The GoPro will be mounted on top carriage of the tank on the side of foil
+closest to the center of the room. Use the ﬂexible arm and 80/20 components
+to ﬁx the camera in position.
+3. Prior to setting up the camera ensure that the following settings are chosen
+in the camera: (use the manual to set them if you are not familiar with the
+camera)
+• Invert the image
+• Use the narrow ﬁeld of view
+• Set the frame rate to 240 hz
+• Choose the highest resolution available at 240hz.
+37
+
+===== PAGE 50 =====
+
+4. Position the GoPro such that it can image the front of the calibration plate
+which should still be located in plane with the laser sheet. The camera can
+be ﬂipped upside down to get the best viewing azimuth.
+5. Ensure that half of the calibration plate that is above the water is visible in
+the camera image.
+6. Once the camera is mounted, record a series of images of the calibration
+plate to use for calibration. DO NOT MOVE THE CAMERA after these
+are taken, or you will have to re-take the images.
+A.4 Calibration
+Once the cameras are set up, focused, and ready to record images, run a few
+test runs to ensure that the trigger, camera angle, and frame rate are suitable.
+Once you are satisﬁed with the image quality and ﬁeld of view, use DaVis to
+calibrate the PIV cameras in accordance with the DaVis Manual and Wizard.
+The calibration for the GoPro video will be done separately as part of the pro-
+cessing to determine the elevation of the free surface.
+A.5 Experiment Execution
+Once the system is calibrated, use the control computer and Matlab to control
+the foil movement.
+1. First, set DaVis to ”record on TTL input”
+2. Open Matlab
+3. Open ’JJ Test’ folder on the desktop or external hard drive.
+4. Open ’tankloop.m’ and ’experimentalsetdeﬁnition.m’
+38
+
+===== PAGE 51 =====
+
+5. ’experimentalsetdeﬁnition.m’ contains the motion proﬁles for the foil. choose
+the appropriate proﬁle (the experiments done for this thesis were conducted
+using set 1).
+6. Set ’Foil y distance’ parameter to 0 cm.
+7. Set ’speed’ to the speed which corresponds to the Froude number in question.
+8. Save ’experimentalsetdeﬁnition.m’
+9. Run ’tankloop.m’
+10. Repeat these steps for each Froude number and distance combination to be
+tested.
+This will start the controller and run the system through one experiment.
+It is necessary to use the GoPro smart phone application to trigger the go pro.
+Trigger the GoPro early as extra frames may be deleted during processing. After
+the experiment has run, ensure that the data is complete and download all images
+from PIV cameras.
+Downloading GoPro Data Images from the GoPro may be downloaded via
+WiFi as follows:
+1. Ensure GoPro WiFi is turned on.
+2. Connect the PIV computer to the ”DahlGoPro” WiFi network, the password
+for the network is the same as the control computer.
+3. Use Chrome to access http://10.5.5.9:8080 this will allow a backdoor into
+the gopro ﬁle system.
+39
+
+===== PAGE 52 =====
+
+4. Navigate to ”dcim” folder and the various videos stored on the GoPro will
+be visible
+5. Right click on the ﬁle to be downloaded and choose ”save destination ﬁle
+as”, select where you want to save it, and click ok.
+6. the ﬁle should now download.
+40
+
+===== PAGE 53 =====
+
+APPENDIX B
+Longitudinal Slice Elevation Processing Procedures
+B.1 Introduction
+In order to take the raw mp4 video from the GoPro and calculate the eleva-
+tions, the video must be processed. During the processing the images in the video
+will be calibrated, the free surface tracked, and then plotted.
+B.2 Creating Frames from Video Files
+Each mp4 ﬁle downloaded from the GoPro should be placed into a folder with
+in the Matlab path. A copy of ’splitmp4.m’ should be placed on the same level as
+the video ﬁles. In Matlab run ’splitmp4.m’ to create separate folders with the video
+ﬁles split into individual frames. This is also a good time to trip any unnecessary
+frames from the ﬁles, this will conserve computing and processing time.
+B.3 Import Video to DaVis
+The folders created in the last section need to be imported back to DaVis.
+DaVis has an ”import” function which will allow the importation of folders of image
+frames. Follow the DaVis Manual to import the images, including the calibration
+images.
+B.4 Calibration
+Once imported, use the calibration wizard to establish the calibration curve
+for the images. Instead of capturing images, use the folder button on the image
+acquisition page of the wizard to locate the calibration frames imported in the last
+step. When prompted for the type of calibration algorithm, choose the ”pinhole
+camera” option. Once the calibration is complete click ”OK”. Verify that the
+calibration of the images is correct by comparing the length of the foil in the
+41
+
+===== PAGE 54 =====
+
+image to the actual length of the foil.
+B.5 Correction
+Once the images are calibrated, click on the processing tab at the top of the
+screen in DaVis. By right clicking and choosing ”hyperloop” it is possible to batch
+process many experiments at once. Once the appropriate folders have been chosen,
+click on the ”Parameter” button at the bottom of the page.
+On the parameter page select the ﬁrst processing step and choose,
+This will apply the calibration function to each image. This is also a good
+time to mask any parts of the image that are not necessary to the calculation of
+the free surface. Using the various masking tools, exclude all of the image with the
+exception of the high intensity line which will be tracked in future steps. Leave
+adequate room above and below the line such that any deﬂections will be retained
+after masking.
+B.6 Export from DaVis to ProAnalyst
+Once the frames are corrected and masked, use the hyperloop tool to export
+the frames as .avi videos. Export all of the frames and ensure that your naming
+convention is still intact. Once exported, the .avi ﬁles can be directly imported to
+ProAnalyst using the ”add ﬁle” option on the toolbar.
+B.7 Establishing Scale and Origin
+Once a ﬁle is open in ProAnalyst, the ﬁrst task is to establish the scale and
+origin of the image.
+Set the ﬁrst point as one of the tick marks on the Y axis of the image. Set
+the second point as the tick mark above or below. Due to the tick mark labels it
+is possible to then set the scale of the image using label associated with each tick
+42
+
+===== PAGE 55 =====
+
+mark and entering in into ProAnalyst. After the scaling is set, place the cursor on
+the image in line with the free surface and click ”set origin” and set the Y axis so
+that positive is up.
+B.8 Establishing Tracking Lines
+ProAnalyst has two options for tracking features in a frame, one dimensional
+tracking, and two dimensional tracking. For the purposes of this experiment, only
+the one dimensional feature is used.
+First, click on the 1-D tab and enable one dimensional tracking. Next lines of
+tracking need to be set. To add a line, click the + button and a new tracking
+line will be added to the list. Use the adjust line feature to set the coordinates
+of the line. When adding lines it is important that all of the lines have the same
+Y-coordinates. This will allow direct comparison between lines and make plotting
+the surface possible. Further details on how to program the lines is available in the
+ProAnalyst Manual. A suﬃcient number of lines to cover a distance equal to one
+chord length away from the foil will need to be set. Save your work as ProAnalyst
+becomes unstable if too many lines are created, thirty lines should be considered
+the maximum number of lines to maintain stability.
+Once all the lines are set, click on the wrench icon on the ﬁrst line. Set the
+tracking feature to highest intensity. This will have the program search for the
+pixels along the tracking line with the highest intensity and record that position.
+Set the line width to 3 pixels. This will provide an initial ﬁlter. Check the box
+’apply to all lines’ so that each line is programmed identically.
+Now that all lines are set and programmed, click on the ’play’ button on the
+bottom of the screen. ProAnalyst will now run through each frame and calculate
+43
+
+===== PAGE 56 =====
+
+the location of the free surface. Once the program has run completely, export the
+data as a ”Blank Excel Spreadsheet”.
+B.9 Processing the Elevation Data from ProAnalyst
+Once all the data has been exported from ProAnalyst, it can be placed into a
+folder in the Matlab path. Make sure that the following ﬁles are also in this folder:
+• generate elevation matrix.m
+• importﬁle.m
+• naca4gen.m
+• plotlist.m
+• nacagen.m
+• suptitle.m
+• ElevationScript.m
+Below is the sequence that these ﬁles should be run as well as a brief expla-
+nation of what they do. Each ﬁle has notes embedded to assist the user. It is
+to adjust certain parameters if a new data set is used. If adjustments need to be
+made they are called out below.
+generate elevation matrix.m This ﬁle combined with ’importﬁle.m’ takes the
+excel spreadsheet from ProAnalyst and imports the data into Matlab .mat format.
+It is important to open this ﬁle and alter the distance parameter and numlin
+variable so suit the data being imported. More details are in the ﬁle.
+44
+
+===== PAGE 57 =====
+
+ElevationScript.m This program sets the axis for the data as well as adjust
+the data for the frame rate. It is important to read this script to ensure that
+the appropriate dimensions are being applied based on frame rate and free surface
+location. The data is also ﬁltered to smooth out any noise in the data.
+plotlist.m This ﬁnal script is used to create plots for data. The script is self
+explanatory and has very few parameters to be adjusted.
+Other Scripts The other scripts located in this ﬁle support those explained
+above. ’nacagen.m’ creates a naca proﬁle with in the plot. ’suptitle.m’ creates a
+superior title at the top of a multi frame plot.
+45
+
+===== PAGE 58 =====
+
+APPENDIX C
+Transverse Slicing Set Up and Experiment Execution
+C.1 Setting up the Tank
+In order to set up the tank do the following:
+1. Clean and ﬁll tank with fresh water to the desired level.
+2. Install Foil to load cell.
+3. Home all axis of the tank drive system using the homing routine on the
+control computer.
+4. Seed the tank with particles, for this experiment 50 nm particles were used.
+C.2 Setting up the PIV system
+1. Phantom Cameras should be placed at the end opposite the tank ﬁlter equip-
+ment such that they are pointed down the length of the tank. They should
+be close to the wall and at a slight angle toward the center of the room.
+2. The trolley with the laser head should be positioned as close to the cameras
+as the track will allow.
+3. The trigger switch that is mounted to the side of the tank should be posi-
+tioned such that it is triggered prior to the foil crossing the laser sheet. Take
+care to measure the distance between the laser sheet and when the trigger is
+activated. This is critical to establishing when the foil crosses the laser plane
+during processing.
+4. Connect the PIV cameras, Laser head, timing controller, and PIV computer
+as instructed by the LaVision manual.
+46
+
+===== PAGE 59 =====
+
+5. Mount the calibration plate so that the laser sheet is in plane with the front
+of the plate and the the plate is located in the same location as where the
+foil will cross the plane of the laser sheet.
+6. Start DaVis 8.0 and choose the record setting, enable both cameras and then
+choose ”live mode”.
+7. Use the calibration plate to adjust the cameras so that they are imagine the
+same area. Do not move the calibration plate, it is important for the next
+part of the set up.
+C.3 Setting up the GoPro
+1. Prior to setting up the camera, download and install the GoPro app onto
+a smart phone. This will allow you to view the camera image prior to the
+testing as well as trigger the camera during testing. The GoPro website
+www.gopro.com has full instructions and information on how to download,
+install, and connect the camera to a smart phone.
+2. The GoPro will be mounted on the side of the tank closest to the wall. Use
+a suction cup mount to stick the ﬂexible arm to the glass.
+3. Prior to setting up the camera ensure that the following settings are chosen
+in the camera: (use the manual to set them if you are not familiar with the
+camera)
+• Invert the image
+• Use the narrow ﬁeld of view
+• Set the frame rate to 240 hz
+• Choose the highest resolution available at 240hz.
+47
+
+===== PAGE 60 =====
+
+4. position the GoPro such that it can image the back of the calibration plate
+which should still be located in plane with the laser sheet. The camera can
+be ﬂipped upside down to get the best viewing azimuth.
+5. Ensure that at least one quarter of the calibration plate is visible in the
+camera image. The more the better.
+6. Once the camera is mounted, record a series of images of the calibration
+plate to use for calibration. DO NOT MOVE THE CAMERA after these
+are taken, or you will have to re-take the images.
+C.4 Calibration
+Once the cameras are set up, focused, and ready to record images, run a few
+test runs to ensure that the trigger, camera angle, and frame rate are suitable.
+Once you are satisﬁed with the image quality and ﬁeld of view, use DaVis to
+calibrate the PIV cameras in accordance with the DaVis Manual and Wizard.
+The calibration for the GoPro video will be done separately as part of the pro-
+cessing to determine the elevation of the free surface.
+C.5 Experiment Execution
+Once the system is calibrated, use the control computer and Matlab to control
+the foil movement.
+1. First, set DaVis to ”record on TTL input”
+2. Open Matlab
+3. Open ’JJ Test’ folder on the desktop or external hard drive.
+4. Open ’tankloop.m’ and ’experimentalsetdeﬁnition.m’
+48
+
+===== PAGE 61 =====
+
+5. ’experimentalsetdeﬁnition.m’ contains the motion proﬁles for the foil. choose
+the appropriate proﬁle (the experiments done for this thesis were conducted
+using set 1).
+6. Set ’Foil y distance’ parameter to −5.0cm.
+7. Set ’speed’ to 0 .31m/s.
+8. Save ’experimentalsetdeﬁnition.m’
+9. Run ’tankloop.m’
+This will start the controller and run the system through one experiment.
+It is necessary to use the GoPro smart phone application to trigger the go pro.
+Trigger the GoPro early as extra frames may be deleted during processing. After
+the experiment has run, ensure that the data is complete and download all images
+from PIV cameras.
+Downloading GoPro Data Images from the GoPro may be downloaded via
+WiFi as follows:
+1. Ensure GoPro WiFi is turned on.
+2. Connect the PIV computer to the ”DahlGoPro” WiFi network, the password
+for the network is the same as the control computer.
+3. Use Chrome to access http://10.5.5.9:8080 this will allow a backdoor into
+the gopro ﬁle system.
+4. Navigate to ”dcim” folder and the various videos stored on the GoPro will
+be visible
+49
+
+===== PAGE 62 =====
+
+5. Right click on the ﬁle to be downloaded and choose ”save destination ﬁle
+as”, select where you want to save it, and click ok.
+6. the ﬁle should now download.
+50
+
+===== PAGE 63 =====
+
+APPENDIX D
+Transverse Slice Elevation Processing Procedures
+D.1 Introduction
+In order to take the raw mp4 video from the GoPro and calculate the eleva-
+tions, the video must be processed. During the processing the images in the video
+will be calibrated, the free surface tracked, and then plotted.
+D.2 Creating Frames from Video Files
+Each mp4 ﬁle downloaded from the GoPro should be placed into a folder with
+in the Matlab path. A copy of ’splitmp4.m’ should be placed on the same level as
+the video ﬁles. In Matlab run ’splitmp4.m’ to create separate folders with the video
+ﬁles split into individual frames. This is also a good time to trip any unnecessary
+frames from the ﬁles, this will conserve computing and processing time.
+D.3 Import Video to DaVis
+The folders created in the last section need to be imported back to DaVis.
+DaVis has an ”import” function which will allow the importation of folders of image
+frames. Follow the DaVis Manual to import the images, including the calibration
+images.
+D.4 Calibration
+Once imported, use the calibration wizard to establish the calibration curve
+for the images. Instead of capturing images, use the folder button on the image
+acquisition page of the wizard to locate the calibration frames imported in the last
+step. When prompted for the type of calibration algorithm, choose the ”pinhole
+camera” option. Once the calibration is complete click ”OK”.
+51
+
+===== PAGE 64 =====
+
+D.5 Correction
+Once the images are calibrated, click on the processing tab at the top of the
+screen in DaVis. By right clicking and choosing ”hyperloop” it is possible to batch
+process many experiments at once. Once the appropriate folders have been chosen,
+click on the ”Parameter” button at the bottom of the page.
+On the parameter page select the ﬁrst processing step and choose,
+This will apply the calibration function to each image. This is also a good
+time to mask any parts of the image that are not necessary to the calculation of
+the free surface. Using the various masking tools, exclude all of the image with the
+exception of the high intensity line which will be tracked in future steps. Leave
+adequate room above and below the line such that any deﬂections will be retained
+after masking.
+D.6 Export from DaVis to ProAnalyst
+Once the frames are corrected and masked, use the hyperloop tool to export
+the frames as .avi videos. Export all of the frames and ensure that your naming
+convention is still intact. Once exported, the .avi ﬁles can be directly imported to
+ProAnalyst using the ”add ﬁle” option on the toolbar.
+D.7 Establishing Scale and Origin
+Once a ﬁle is open in ProAnalyst, the ﬁrst task is to establish the scale and
+origin of the image.
+Set the ﬁrst point as one of the tick marks on the Y axis of the image. Set
+the second point as the tick mark above or below. Due to the tick mark labels it
+is possible to then set the scale of the image using label associated with each tick
+mark and entering in into ProAnalyst. After the scaling is set, place the cursor on
+the image in line with the free surface and click ”set origin” and set the Y axis so
+52
+
+===== PAGE 65 =====
+
+that positive is up.
+D.8 Establishing Tracking Lines
+ProAnalyst has two options for tracking features in a frame, one dimensional
+tracking, and two dimensional tracking. For the purposes of this experiment, only
+the one dimensional feature is used.
+First, click on the 1-D tab and enable one dimensional tracking. Next lines of
+tracking need to be set. To add a line, click the + button and a new tracking
+line will be added to the list. Use the adjust line feature to set the coordinates
+of the line. When adding lines it is important that all of the lines have the same
+Y-coordinates. This will allow direct comparison between lines and make plotting
+the surface possible. Further details on how to program the lines is available in the
+ProAnalyst Manual. A suﬃcient number of lines to cover a distance equal to one
+chord length away from the foil will need to be set. Save your work as ProAnalyst
+becomes unstable if too many lines are created, thirty lines should be considered
+the maximum number of lines to maintain stability.
+Once all the lines are set, click on the wrench icon on the ﬁrst line. Set the
+tracking feature to highest intensity. This will have the program search for the
+pixels along the tracking line with the highest intensity and record that position.
+Set the line width to 3 pixels. This will provide an initial ﬁlter. Check the box
+’apply to all lines’ so that each line is programmed identically.
+Now that all lines are set and programmed, click on the ’play’ button on the
+bottom of the screen. ProAnalyst will now run through each frame and calculate
+the location of the free surface. Once the program has run completely, export the
+data as a ”Blank Excel Spreadsheet”.
+53
+
+===== PAGE 66 =====
+
+D.9 Processing the Elevation Data from ProAnalyst
+Once all the data has been exported from ProAnalyst, it can be placed into a
+folder in the Matlab path. Make sure that the following ﬁles are also in this folder:
+• generate elevation matrix.m
+• importﬁle.m
+• naca4gen.m
+• plotlist.m
+• nacagen.m
+• suptitle.m
+• ElevationScript.m
+Below is the sequence that these ﬁles should be run as well as a brief expla-
+nation of what they do. Each ﬁle has notes embedded to assist the user. It is
+necessary to adjust certain parameters if a new data set is used. If adjustments
+need to be made they are called out below.
+generate elevation matrix.m This ﬁle combined with ’importﬁle.m’ takes the
+excel spreadsheet from ProAnalyst and imports the data into Matlab .mat format.
+It is important to open this ﬁle and alter the distance parameter and numlin
+variable so suit the data being imported. More details are in the ﬁle.
+ElevationScript.m This program sets the axis for the data as well as adjust
+the data for the frame rate. It is important to read this script to ensure that
+the appropriate dimensions are being applied based on frame rate and free surface
+location. The data is also ﬁltered to smooth out any noise in the data.
+54
+
+===== PAGE 67 =====
+
+plotlist.m This ﬁnal script is used to create plots for data. The script is self
+explanatory and has very few parameters to be adjusted.
+Other Scripts The other scripts located in this ﬁle support those explained
+above. ’nacagen.m’ creates a naca proﬁle with in the plot. ’suptitle.m’ creates a
+superior title at the top of a multi frame plot.
+55
+
+===== PAGE 68 =====
+
+APPENDIX E
+Comparison of Methods Proceedure
+E.1 Introduction
+In order to compare the two methods Dynamic Mode Decomposition as ex-
+plained by (Schmidt, 2010) is used. This method
+E.2 Matlab Script and Function Descriptions
+E.2.1 matrixweave.m
+The function assembles the three component velocities (U,V,W) into a matrix
+such that each column of the matrix represents a single snapshot of the ﬂow. U, V,
+W are arranged vertically in the column. Details on how to utilize this function,
+input and output are found in the function itself.
+E.2.2 DMD FlowField.m
+This function is the actual Dynamic Mode Decomposition. It uses the math-
+ematical principles described in (Schmidt, 2010) to break the ﬂow into individual
+modes. The input to this function in the output from matrixweave.m.
+E.2.3 axisscales.m
+This script contains the axis scale values for all plots. This allows the axis lim-
+its and increments to be changed in one locations. It is used in both DMDLong.m
+and DMDTransverse.m.
+E.2.4 DMDLong.m
+This script carries out data processing and DMD on the longitudinally sliced
+data. It contains all of the above functions, plus some data manipulation in order
+to plot the most signiﬁcant mode present in the data.
+56
+
+===== PAGE 69 =====
+
+E.2.5 DMDTransverse.m
+This script carries out the data processing and DMD on the transversely sliced
+data. It contains the functions above in addition to data manipulation required to
+plot the most signiﬁcant mode present in the data.
+E.3 Operational Proceedures
+1. Place the ﬁnal data sets for the method to be analyzed into the Matlab
+directory.
+2. Open the DMDTransverse.m or DMDLong.m which applies to the data
+present.
+3. Update the name of the ﬁle to be loaded on line 7.
+4. Update the chord length of the foil used.
+5. Run the script.
+6. Open the Ui variable which represents the imaginary portion of the complex
+mode shape. Make note of the columns which present at all zeros. These are
+the most signiﬁcant modes.
+7. Place the column numbers into the array on line 74 as values of q.
+8. Run the script again. A ﬁgure should print to the screen for each number
+you placed into array q. Each plot is one of the signiﬁcant mode shapes.
+Choose the one that best represents the original data.
+9. Delete the values in q that do not best represent the data. The remaining
+plot will be of the most signiﬁcant mode shape.
+57
+
+===== PAGE 70 =====
+
+A full description of how DMD works can be found in (Schmidt, 2010). Each
+script and function contains notes within the individual ﬁle to describe what is
+occurring with in the script.
+List of References
+Schmidt, P. J. (2010). Dynamic mode decomposition of numerical and experimen-
+tal data.
+58
+
+===== PAGE 71 =====
+
+BIBLIOGRAPHY
+Chatellier, L., Jarny, S., Gibouin, F., and David, L., “Stereoscopic measurement
+of free surface ﬂows,” in ICEM 14 - 14th International Conference on
+Experimental Mechanics , vol. 6. EPJ Web of Conferences, Conference
+Proceedings, p. 8. [Online]. Available: http://dx.doi.org/10.1051/epjconf/
+20100612002
+Fouras, A., Hourigan, K., Kawahashi, M., and Hirahara, H., “An improved, free
+surface, topographic technique,” Journal of Visualization , 2006.
+Fouras, A., Jacono, D. L., and Hourigan, K., “Target-free stereo piv: a novel
+technique with inherent error estimation and improved accuracy,” 2008.
+Fouras, A., JDusting, J., and Hourigan, K., “A simple calibration technique for
+stereoscopic particle image velocimetry,” 2007.
+Fouras, A., Lo Jacono, D., Sheard, G. J., and Hourigan, K., “Measurement of
+instantaneous velocity and surface topography of a cylinder at low reynolds
+number,” Journal of Fluids and Structures , vol. 24, no. 8, pp. 1271–1277, 2008.
+Gomit, G., Calluaud, D., Chatellier, L., and David, L., “Free surface measurement
+by stereo-refraction,” 2012.
+Laitone, E., “Wind tunnel tests of wings at reynolds numbers below 70,000,” 1997.
+Metcalf, B., Longo, J., Ghosh, S., and Stern, F., “Unsteady free-surface
+wave-induced boundary-layer separation for a surface-piercing naca 0024
+foil: Towing tank experiments,” Journal of Fluids and Structures ,
+vol. 22, no. 1, pp. 77–98, 2006, times Cited: 9 10. [Online]. Available:
+⟨GotoISI⟩://WOS:000234695200006
+Ng, I., Kumar, V., Sheard, G. J., Hourigan, K., and Fouras, A., “Experimental
+study of instantaneous measurement of velocity and surface topography in a
+wake of the circular cylinder at low reynolds number,” 2009.
+OReilly, C., Grilli, S., Dahl, J., Banari, A., Janssen, C., Schock, J., and Uber-
+rueck, M., “A hybrid naval hydrodynamic scheme based on an eﬃcient lattice
+boltzmann method coupled to a potential ﬂow solver,” 2015.
+Prasad, A. K., “Stereoscopic particle image velocimetry,” Experiments in Fluids ,
+vol. 29, pp. 103–116, 2000.
+Prasad, A. K. and Adrian, R. J., “Stereoscopic particle image velocimetry applied
+to liquid ﬂows,” Experiments in Fluids , vol. 15, pp. 49–60, 1992.
+59
+
+===== PAGE 72 =====
+
+Reilly-Collette, M. I., “Prediction method of the vortex induced vibration of a one
+degree-of-freedom spring-mass system,” 2014.
+Reliquet, G., “Simulation num´ erique de l’interaction houle/car` ene par couplage
+d’une m´ ethode spectrale hos avec un algorithme de capture d’interface,” 2013.
+Schmidt, P. J., “Dynamic mode decomposition of numerical and experimental
+data,” 2010.
+Willert, C. E. and Gharib, M., “Digital partical image velocimetry,” Experiments
+in Fluids , 1991.
+60

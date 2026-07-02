@@ -5,12 +5,8 @@ The script scans Webots run directories under ``logs`` and selects:
 1. The latest run with obstacle EKF prediction enabled.
 2. The latest compatible run with obstacle EKF prediction disabled.
 
-Either run may be successful or failed. A run fails only when the own-ship
-body overlaps a clustered obstacle:
-
-``centre distance < own-ship radius + clustered-obstacle radius``.
-
-The configured safety distance does not determine the outcome.
+Either run may be successful or failed. The outcome is read exclusively from
+the Webots bumper contact sensor record.
 
 Historical logs do not contain the Webots world filename. Two runs are
 therefore treated as the same environment only when their initial own-ship
@@ -20,7 +16,6 @@ positions, APF settings, and nearest-obstacle world trajectories match.
 from __future__ import annotations
 
 import argparse
-import ast
 import csv
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,10 +28,11 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 import numpy as np
 
+from webots_collision import collision_detected
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOGS_DIR = PROJECT_ROOT / "logs"
-DEFAULT_LAPTOP_PATH = PROJECT_ROOT / "src" / "laptop.py"
 DEFAULT_OUTPUT_DIR = DEFAULT_LOGS_DIR / "generated_figures"
 
 TIME_COLUMNS = ("TimeFromStart(s)", "TimeFromStart", "elapsed [s]")
@@ -76,9 +72,7 @@ class RunRecord:
     time_s: np.ndarray
     distance_m: np.ndarray
     obstacle_position_ne_m: np.ndarray
-    collision_time_s: np.ndarray
-    collision_distance_m: np.ndarray
-    collision_boundary_m: np.ndarray
+    collision_detected: bool
     initial_own_position_ne_m: np.ndarray
     matched_settings: dict[str, object]
 
@@ -86,21 +80,12 @@ class RunRecord:
     def minimum_distance_m(self) -> float:
         return float(np.min(self.distance_m))
 
-    @property
-    def collision_clearance_m(self) -> np.ndarray:
-        return self.collision_distance_m - self.collision_boundary_m
-
-    @property
-    def minimum_collision_clearance_m(self) -> float:
-        return float(np.min(self.collision_clearance_m))
-
-    @property
-    def collision_boundary_at_closest_clearance_m(self) -> float:
-        index = int(np.argmin(self.collision_clearance_m))
-        return float(self.collision_boundary_m[index])
-
     def succeeded(self) -> bool:
-        return self.minimum_collision_clearance_m >= 0.0
+        return not self.collision_detected
+
+
+def read_collision_detected(run_dir: Path) -> bool:
+    return collision_detected(run_dir, required=True)
 
 
 @dataclass
@@ -256,90 +241,9 @@ def read_csv_series(
     )
 
 
-def read_snapshot_collision_series(
-    run_dir: Path,
-    first_log_time_s: float,
-    own_radius_m: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    times = []
-    distances = []
-    boundaries = []
-
-    for snapshot_path in sorted(run_dir.glob("obstacle_*.json")):
-        with snapshot_path.open(encoding="utf-8") as stream:
-            payload = json.load(stream)
-
-        time_s = parse_float(payload.get("t"))
-        robot_position = np.asarray(
-            payload.get("robot_pos", [np.nan, np.nan]),
-            dtype=float,
-        ).reshape(2)
-        clusters = payload.get("clusters", [])
-        if (
-            not np.isfinite(time_s)
-            or not np.isfinite(robot_position).all()
-            or not isinstance(clusters, list)
-        ):
-            continue
-
-        candidates = []
-        for cluster in clusters:
-            if not isinstance(cluster, dict):
-                continue
-            centre_ne = np.asarray(
-                cluster.get("centre_ne", [np.nan, np.nan]),
-                dtype=float,
-            ).reshape(2)
-            obstacle_radius_m = parse_float(
-                cluster.get("equivalent_radius_m")
-            )
-            if (
-                not np.isfinite(centre_ne).all()
-                or not np.isfinite(obstacle_radius_m)
-                or obstacle_radius_m <= 0.0
-            ):
-                continue
-
-            centre_distance_m = float(
-                np.linalg.norm(robot_position - centre_ne)
-            )
-            collision_boundary_m = own_radius_m + obstacle_radius_m
-            candidates.append(
-                (
-                    centre_distance_m - collision_boundary_m,
-                    centre_distance_m,
-                    collision_boundary_m,
-                )
-            )
-
-        if not candidates:
-            continue
-
-        _, centre_distance_m, collision_boundary_m = min(
-            candidates,
-            key=lambda candidate: candidate[0],
-        )
-        times.append(float(time_s) - first_log_time_s)
-        distances.append(centre_distance_m)
-        boundaries.append(collision_boundary_m)
-
-    if not times:
-        raise ValueError("No valid clustered-obstacle collision samples")
-
-    time_array = np.asarray(times, dtype=float)
-    distance_array = np.asarray(distances, dtype=float)
-    boundary_array = np.asarray(boundaries, dtype=float)
-    order = np.argsort(time_array)
-    return (
-        time_array[order],
-        distance_array[order],
-        boundary_array[order],
-    )
-
-
 def read_snapshot_metadata(
     run_dir: Path,
-) -> tuple[bool, float, float, dict[str, object]]:
+) -> tuple[bool, float, dict[str, object]]:
     snapshot_paths = sorted(run_dir.glob("obstacle_*.json"))
     if not snapshot_paths:
         raise ValueError("No obstacle_*.json snapshots")
@@ -384,26 +288,14 @@ def read_snapshot_metadata(
             if np.isfinite(dcpa_scale) and np.isfinite(minimum_radius_m):
                 safety_distance_m = dcpa_scale * minimum_radius_m
         safety_values.append(safety_distance_m)
-    if not all(np.isfinite(value) and value > 0.0 for value in safety_values):
-        raise ValueError("No valid DCPA threshold metadata")
+    if not any(np.isfinite(value) and value > 0.0 for value in safety_values):
+        safety_values = [1.4] * len(safety_values)
+    elif not all(np.isfinite(value) and value > 0.0 for value in safety_values):
+        raise ValueError("Incomplete DCPA threshold metadata")
     if any(
         not np.isclose(value, safety_values[0]) for value in safety_values[1:]
     ):
         raise ValueError("Safety distance changes within the run")
-
-    own_radius_values = [
-        parse_float(settings.get("own_equivalent_radius_m"))
-        for settings in sampled_settings
-    ]
-    if not all(
-        np.isfinite(value) and value > 0.0 for value in own_radius_values
-    ):
-        raise ValueError("No valid own_equivalent_radius_m value")
-    if any(
-        not np.isclose(value, own_radius_values[0])
-        for value in own_radius_values[1:]
-    ):
-        raise ValueError("Own-ship radius changes within the run")
 
     matched_settings = {
         key: sampled_settings[0].get(key) for key in MATCHED_SETTING_KEYS
@@ -413,7 +305,6 @@ def read_snapshot_metadata(
     return (
         bool(ekf_values[0]),
         float(safety_values[0]),
-        float(own_radius_values[0]),
         matched_settings,
     )
 
@@ -426,7 +317,6 @@ def load_run(run_dir: Path) -> RunRecord:
     (
         ekf_enabled,
         safe_distance_m,
-        own_radius_m,
         matched_settings,
     ) = read_snapshot_metadata(run_dir)
     (
@@ -434,17 +324,8 @@ def load_run(run_dir: Path) -> RunRecord:
         distance_m,
         obstacle_position_ne_m,
         initial_own_position_ne_m,
-        first_log_time_s,
+        _,
     ) = read_csv_series(log_path)
-    (
-        collision_time_s,
-        collision_distance_m,
-        collision_boundary_m,
-    ) = read_snapshot_collision_series(
-        run_dir=run_dir,
-        first_log_time_s=first_log_time_s,
-        own_radius_m=own_radius_m,
-    )
     return RunRecord(
         run_dir=run_dir.resolve(),
         log_path=log_path.resolve(),
@@ -454,9 +335,7 @@ def load_run(run_dir: Path) -> RunRecord:
         time_s=time_s,
         distance_m=distance_m,
         obstacle_position_ne_m=obstacle_position_ne_m,
-        collision_time_s=collision_time_s,
-        collision_distance_m=collision_distance_m,
-        collision_boundary_m=collision_boundary_m,
+        collision_detected=read_collision_detected(run_dir),
         initial_own_position_ne_m=initial_own_position_ne_m,
         matched_settings=matched_settings,
     )
@@ -590,31 +469,6 @@ def select_latest_pair(
     return candidates[0]
 
 
-def read_laptop_ekf_switch(laptop_path: Path) -> bool:
-    """Read the module-level switch without importing laptop.py."""
-    tree = ast.parse(
-        laptop_path.read_text(encoding="utf-8"),
-        filename=str(laptop_path),
-    )
-    for node in tree.body:
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if not any(
-            isinstance(target, ast.Name)
-            and target.id == "ENABLE_OBSTACLE_EKF_PREDICTION"
-            for target in targets
-        ):
-            continue
-        value = ast.literal_eval(node.value)
-        if isinstance(value, bool):
-            return value
-        break
-    raise ValueError(
-        f"Could not read ENABLE_OBSTACLE_EKF_PREDICTION from {laptop_path}"
-    )
-
-
 def outcome_text(record: RunRecord) -> str:
     return "succeeded" if record.succeeded() else "failed"
 
@@ -663,24 +517,6 @@ def plot_pair(
             + outcome_text(no_ekf_record)
         ),
     )
-    ax.plot(
-        ekf_record.collision_time_s,
-        ekf_record.collision_boundary_m,
-        color="#1f77b4",
-        linestyle=":",
-        linewidth=1.2,
-        alpha=0.8,
-        label="EKF clustered-obstacle boundary",
-    )
-    ax.plot(
-        no_ekf_record.collision_time_s,
-        no_ekf_record.collision_boundary_m,
-        color=no_ekf_color,
-        linestyle=":",
-        linewidth=1.2,
-        alpha=0.8,
-        label="No-EKF clustered-obstacle boundary",
-    )
     ax.set_title("Distance to the Nearest Obstacle Ship")
     ax.set_xlabel("Motion time (s)")
     ax.set_ylabel("Distance between own ship and obstacle ship (m)")
@@ -702,8 +538,7 @@ def print_run_summary(records: list[RunRecord]) -> None:
         print(
             f"  {record.run_dir.name}: EKF={record.ekf_enabled}, "
             f"minimum={record.minimum_distance_m:.3f} m, "
-            f"minimum_cluster_clearance="
-            f"{record.minimum_collision_clearance_m:.3f} m, "
+            f"contact_sensor={record.collision_detected}, "
             f"outcome={outcome_text(record)}"
         )
 
@@ -740,12 +575,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum 90th-percentile trajectory difference in metres",
     )
     parser.add_argument(
-        "--laptop",
-        type=Path,
-        default=DEFAULT_LAPTOP_PATH,
-        help="laptop.py containing ENABLE_OBSTACLE_EKF_PREDICTION",
-    )
-    parser.add_argument(
         "--output",
         type=Path,
         help=(
@@ -760,12 +589,6 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.minimum_overlap <= 0.0:
         raise ValueError("The minimum overlap must be greater than zero.")
-
-    laptop_ekf_enabled = read_laptop_ekf_switch(args.laptop)
-    print(
-        "Current laptop.py setting: ENABLE_OBSTACLE_EKF_PREDICTION="
-        f"{laptop_ekf_enabled}"
-    )
 
     records, skipped = scan_runs(args.logs_dir)
     print_run_summary(records)
@@ -798,14 +621,12 @@ def main() -> None:
     print(
         f"EKF outcome: {outcome_text(ekf_record)}, "
         f"minimum={ekf_record.minimum_distance_m:.3f} m, "
-        f"minimum cluster clearance="
-        f"{ekf_record.minimum_collision_clearance_m:.3f} m"
+        f"contact sensor={ekf_record.collision_detected}"
     )
     print(
         f"Non-EKF outcome: {outcome_text(no_ekf_record)}, "
         f"minimum={no_ekf_record.minimum_distance_m:.3f} m, "
-        f"minimum cluster clearance="
-        f"{no_ekf_record.minimum_collision_clearance_m:.3f} m"
+        f"contact sensor={no_ekf_record.collision_detected}"
     )
 
     plot_pair(
