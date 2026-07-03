@@ -23,6 +23,8 @@ DEFAULT_OUTPUT_DIR = DEFAULT_LOGS_DIR / "generated_figures" / "speed_overtaking"
 TIME_COLUMNS = ("TimeFromStart(s)", "TimeFromStart", "elapsed [s]")
 OWN_NORTH_COLUMNS = ("North(m)", "North", "x [m]")
 OWN_EAST_COLUMNS = ("East(m)", "East", "y [m]")
+ARUCO_NORTH_COLUMNS = ("ARUCOSensedNorth(m)", "ARUCOSensedNorth")
+ARUCO_EAST_COLUMNS = ("ARUCOSensedEast(m)", "ARUCOSensedEast")
 OBSTACLE_NORTH_COLUMNS = ("NearestObstacleNorth(m)", "NearestObstacleNorth")
 OBSTACLE_EAST_COLUMNS = ("NearestObstacleEast(m)", "NearestObstacleEast")
 SPEED_WORLD_PATTERN = re.compile(
@@ -97,7 +99,7 @@ def find_primary_csv(run_dir: Path) -> Path:
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
-def load_run(run_dir: Path) -> RunRecord | None:
+def load_run(run_dir: Path, use_aruco: bool = False) -> RunRecord | None:
     log_path = find_primary_csv(run_dir)
     with log_path.open(newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
@@ -114,10 +116,12 @@ def load_run(run_dir: Path) -> RunRecord | None:
         own_positions = []
         obstacle_positions = []
         distances = []
+        own_north_columns = ARUCO_NORTH_COLUMNS if use_aruco else OWN_NORTH_COLUMNS
+        own_east_columns = ARUCO_EAST_COLUMNS if use_aruco else OWN_EAST_COLUMNS
         for row in (first_row, *reader):
             time_s = parse_float(first_existing(row, TIME_COLUMNS))
-            own_north = parse_float(first_existing(row, OWN_NORTH_COLUMNS))
-            own_east = parse_float(first_existing(row, OWN_EAST_COLUMNS))
+            own_north = parse_float(first_existing(row, own_north_columns))
+            own_east = parse_float(first_existing(row, own_east_columns))
             obstacle_north = parse_float(
                 first_existing(row, OBSTACLE_NORTH_COLUMNS)
             )
@@ -178,11 +182,12 @@ def selected_run_dirs(logs_dir: Path, run_dirs: list[Path] | None) -> list[Path]
 def collect_runs(
     logs_dir: Path,
     run_dirs: list[Path] | None = None,
+    use_aruco: bool = False,
 ) -> dict[str, list[RunRecord]]:
     latest_by_group_speed: dict[tuple[str, float], RunRecord] = {}
     for run_dir in selected_run_dirs(logs_dir, run_dirs):
         try:
-            record = load_run(run_dir)
+            record = load_run(run_dir, use_aruco=use_aruco)
         except (FileNotFoundError, OSError, ValueError):
             continue
         if record is None:
@@ -205,16 +210,31 @@ def collect_runs(
     }
 
 
-def plot_group(records: list[RunRecord], output_path: Path) -> None:
+def plot_group(
+    records: list[RunRecord],
+    output_path: Path,
+    use_aruco: bool = False,
+    trajectory_only: bool = False,
+    include_obstacle: bool = True,
+) -> None:
     colors = plt.get_cmap("viridis")(
         np.linspace(0.08, 0.88, len(records))
     )
-    figure, (trajectory_ax, distance_ax) = plt.subplots(
-        1,
-        2,
-        figsize=(14.0, 6.2),
-        dpi=180,
-    )
+    if trajectory_only:
+        figure, trajectory_ax = plt.subplots(
+            1,
+            1,
+            figsize=(8.0, 6.2),
+            dpi=180,
+        )
+        distance_ax = None
+    else:
+        figure, (trajectory_ax, distance_ax) = plt.subplots(
+            1,
+            2,
+            figsize=(14.0, 6.2),
+            dpi=180,
+        )
 
     speed_handles = []
     for record, color in zip(records, colors):
@@ -226,26 +246,32 @@ def plot_group(records: list[RunRecord], output_path: Path) -> None:
             linewidth=2.2,
             label=speed_label,
         )
-        trajectory_ax.plot(
-            record.obstacle_position_ne_m[:, 1],
-            record.obstacle_position_ne_m[:, 0],
-            color=color,
-            linestyle="--",
-            linewidth=1.5,
-            alpha=0.8,
-        )
+        if include_obstacle:
+            trajectory_ax.plot(
+                record.obstacle_position_ne_m[:, 1],
+                record.obstacle_position_ne_m[:, 0],
+                color=color,
+                linestyle="--",
+                linewidth=1.5,
+                alpha=0.8,
+            )
         speed_handles.append(own_line)
 
-        minimum_distance_m = float(np.min(record.distance_m))
-        distance_ax.plot(
-            record.time_s,
-            record.distance_m,
-            color=color,
-            linewidth=2.0,
-            label=f"{speed_label} (min {minimum_distance_m:.2f} m)",
-        )
+        if distance_ax is not None:
+            minimum_distance_m = float(np.min(record.distance_m))
+            distance_ax.plot(
+                record.time_s,
+                record.distance_m,
+                color=color,
+                linewidth=2.0,
+                label=f"{speed_label} (min {minimum_distance_m:.2f} m)",
+            )
 
-    trajectory_ax.set_title("Trajectories (solid: own ship; dashed: obstacle)")
+    own_ship_source = "ArUco position" if use_aruco else "own ship state"
+    trajectory_ax.set_title(
+        "Trajectories "
+        f"(solid: {own_ship_source}; dashed: obstacle)"
+    )
     trajectory_ax.set_xlabel("East position (m)")
     trajectory_ax.set_ylabel("North position (m)")
     trajectory_ax.grid(True, linestyle=":", alpha=0.35)
@@ -256,9 +282,11 @@ def plot_group(records: list[RunRecord], output_path: Path) -> None:
         loc="best",
     )
     trajectory_ax.add_artist(speed_legend)
-    trajectory_ax.legend(
-        handles=[
-            Line2D([0], [0], color="black", linewidth=2.2, label="Own ship"),
+    legend_handles = [
+        Line2D([0], [0], color="black", linewidth=2.2, label="Own ship"),
+    ]
+    if include_obstacle:
+        legend_handles.append(
             Line2D(
                 [0],
                 [0],
@@ -266,22 +294,23 @@ def plot_group(records: list[RunRecord], output_path: Path) -> None:
                 linestyle="--",
                 linewidth=1.5,
                 label="Obstacle ship",
-            ),
-        ],
-        loc="lower right",
-    )
+            )
+        )
+    trajectory_ax.legend(handles=legend_handles, loc="lower right")
 
-    distance_ax.set_title("Distance Between Own Ship and Obstacle")
-    distance_ax.set_xlabel("Motion time (s)")
-    distance_ax.set_ylabel("Distance (m)")
-    distance_ax.set_xlim(left=0.0)
-    distance_ax.set_ylim(bottom=0.0)
-    distance_ax.grid(True, linestyle=":", alpha=0.35)
-    distance_ax.legend(loc="best", title="Obstacle speed")
+    if distance_ax is not None:
+        distance_ax.set_title("Distance Between Own Ship and Obstacle")
+        distance_ax.set_xlabel("Motion time (s)")
+        distance_ax.set_ylabel("Distance (m)")
+        distance_ax.set_xlim(left=0.0)
+        distance_ax.set_ylim(bottom=0.0)
+        distance_ax.grid(True, linestyle=":", alpha=0.35)
+        distance_ax.legend(loc="best", title="Obstacle speed")
 
     display_name = records[0].group_name.replace("_", " ").title()
+    source_name = "ArUco trajectory" if use_aruco else "trajectory"
     figure.suptitle(
-        f"{display_name}: Obstacle-Speed Comparison\n"
+        f"{display_name}: Obstacle-Speed Comparison ({source_name})\n"
         "EKF prediction on, cluster-size APF on"
     )
     figure.tight_layout()
@@ -294,8 +323,11 @@ def plot_obstacle_speed_comparisons(
     logs_dir: Path,
     output_dir: Path,
     run_dirs: list[Path] | None = None,
+    use_aruco: bool = False,
+    trajectory_only: bool = False,
+    include_obstacle: bool = True,
 ) -> list[tuple[Path, list[RunRecord]]]:
-    groups = collect_runs(logs_dir, run_dirs)
+    groups = collect_runs(logs_dir, run_dirs, use_aruco=use_aruco)
     if not groups:
         raise ValueError(
             "No environment has at least two obstacle speeds with "
@@ -304,8 +336,25 @@ def plot_obstacle_speed_comparisons(
 
     outputs = []
     for group_name, records in sorted(groups.items()):
-        output_path = output_dir / f"{group_name}_speed_distance_trajectory.png"
-        plot_group(records, output_path)
+        suffix = (
+            "speed_aruco_trajectory"
+            if use_aruco and trajectory_only
+            else "speed_distance_aruco_trajectory"
+            if use_aruco
+            else "speed_trajectory"
+            if trajectory_only
+            else "speed_distance_trajectory"
+        )
+        if not include_obstacle:
+            suffix += "_own_only"
+        output_path = output_dir / f"{group_name}_{suffix}.png"
+        plot_group(
+            records,
+            output_path,
+            use_aruco=use_aruco,
+            trajectory_only=trajectory_only,
+            include_obstacle=include_obstacle,
+        )
         outputs.append((output_path, records))
     return outputs
 
@@ -326,12 +375,30 @@ def main() -> None:
         dest="run_dirs",
         help="Explicit run_* directory to include; repeat for multiple runs.",
     )
+    parser.add_argument(
+        "--use-aruco",
+        action="store_true",
+        help="Plot the own-ship trajectory from ARUCOSensedNorth/East columns.",
+    )
+    parser.add_argument(
+        "--trajectory-only",
+        action="store_true",
+        help="Plot only trajectories and skip the distance subplot.",
+    )
+    parser.add_argument(
+        "--no-obstacle",
+        action="store_true",
+        help="Do not draw obstacle-ship trajectories.",
+    )
     args = parser.parse_args()
 
     outputs = plot_obstacle_speed_comparisons(
         args.logs_dir,
         args.output_dir,
         args.run_dirs,
+        use_aruco=args.use_aruco,
+        trajectory_only=args.trajectory_only,
+        include_obstacle=not args.no_obstacle,
     )
     for output_path, records in outputs:
         speeds = ", ".join(

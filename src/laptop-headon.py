@@ -419,6 +419,7 @@ class LaptopController:
         self.apf_track_timeout_s = 1.5 if self.OPERATING_MODE == 2 else 1.0
         self.apf_next_track_id = 1
         self.apf_obstacle_tracks = []
+        self.apf_obstacle_track_candidates = []
         self.apf_virtual_obstacles = []
         self.obstacle_ekf_measurement_std_m = 0.08 if self.OPERATING_MODE == 2 else 0.12
         self.obstacle_ekf_accel_std_m_s2 = 0.20 if self.OPERATING_MODE == 2 else 0.35
@@ -1134,6 +1135,7 @@ class LaptopController:
             self.apf_steering_force_body = np.zeros(2, dtype=float)
             self.apf_target_ne = np.array([np.nan, np.nan], dtype=float)
             self.apf_virtual_obstacles = []
+            self.apf_obstacle_track_candidates = []
             self.apf_visual_hold_until_s = 0.0
 
         self.apf_active_profile_name = "crossing"
@@ -1489,6 +1491,31 @@ class LaptopController:
         self.apf_next_track_id += 1
         return track
 
+    def make_obstacle_track_candidate(
+        self,
+        detection_ne,
+        stamp_s,
+        pc1_m=np.nan,
+        pc2_m=np.nan,
+        length_axis_ne=None,
+    ):
+        detection_ne = np.asarray(detection_ne, dtype=float).reshape(2)
+        length_axis_ne = np.asarray(
+            [1.0, 0.0] if length_axis_ne is None else length_axis_ne,
+            dtype=float,
+        ).reshape(2)
+        pc1_m = float(pc1_m) if np.isfinite(pc1_m) and pc1_m > 0.0 else self.obstacle_min_pc1_m
+        pc2_m = float(pc2_m) if np.isfinite(pc2_m) and pc2_m > 0.0 else self.obstacle_min_pc2_m
+        return {
+            "centre_ne": detection_ne.copy(),
+            "stamp_s": float(stamp_s),
+            "last_seen_s": float(stamp_s),
+            "hit_count": 1,
+            "pc1_m": pc1_m,
+            "pc2_m": pc2_m,
+            "length_axis_ne": length_axis_ne,
+        }
+
     def predict_obstacle_track_to_time(self, track, stamp_s):
         now = float(stamp_s)
         dt = max(now - float(track.get("stamp_s", now)), 0.0)
@@ -1749,6 +1776,7 @@ class LaptopController:
             return
 
         now = float(stamp_s if stamp_s is not None else time.time())
+        confirmation_hits = max(int(getattr(self, "obstacle_track_confirmation_hits", 2)), 2)
         detections = []
 
         for obstacle_index, obstacle in enumerate(self.lidar_obstacles):
@@ -1779,6 +1807,11 @@ class LaptopController:
                 )
 
         if not detections:
+            self.apf_obstacle_track_candidates = [
+                candidate
+                for candidate in self.apf_obstacle_track_candidates
+                if now - float(candidate.get("last_seen_s", candidate.get("stamp_s", now))) <= self.apf_track_timeout_s
+            ]
             for track in self.apf_obstacle_tracks:
                 self.predict_obstacle_track_to_time(track, now)
                 track["miss_count"] = int(track.get("miss_count", 0)) + 1
@@ -1792,6 +1825,7 @@ class LaptopController:
         )
         predicted_tracks = []
         candidates = []
+        matched_candidates = set()
 
         for track_index, track in enumerate(self.apf_obstacle_tracks):
             dt = max(now - float(track.get("stamp_s", now)), 0.0)
@@ -1861,21 +1895,60 @@ class LaptopController:
                 continue
 
             _, detection_ne, pc1_m, pc2_m, length_axis_ne, _ = detection
-            track = self.make_obstacle_track(
-                detection_ne,
-                now,
-                pc1_m=pc1_m,
-                pc2_m=pc2_m,
-                length_axis_ne=length_axis_ne,
+            best_candidate_index = None
+            best_candidate_distance = np.inf
+            for candidate_index, candidate in enumerate(self.apf_obstacle_track_candidates):
+                if candidate_index in matched_candidates:
+                    continue
+                candidate_pos = np.asarray(candidate.get("centre_ne", [np.nan, np.nan]), dtype=float).reshape(2)
+                if not np.isfinite(candidate_pos).all():
+                    continue
+                distance = float(np.linalg.norm(detection_ne - candidate_pos))
+                if distance < best_candidate_distance:
+                    best_candidate_distance = distance
+                    best_candidate_index = candidate_index
+
+            if best_candidate_index is not None and best_candidate_distance <= self.apf_track_association_m:
+                candidate = self.apf_obstacle_track_candidates[best_candidate_index]
+                candidate["centre_ne"] = detection_ne.copy()
+                candidate["last_seen_s"] = now
+                candidate["hit_count"] = int(candidate.get("hit_count", 0)) + 1
+                candidate["pc1_m"] = pc1_m
+                candidate["pc2_m"] = pc2_m
+                candidate["length_axis_ne"] = length_axis_ne
+                matched_candidates.add(best_candidate_index)
+                if int(candidate["hit_count"]) >= confirmation_hits:
+                    track = self.make_obstacle_track(
+                        detection_ne,
+                        now,
+                        pc1_m=pc1_m,
+                        pc2_m=pc2_m,
+                        length_axis_ne=length_axis_ne,
+                    )
+                    self.apf_obstacle_tracks.append(track)
+                    assigned_detections.add(detection_index)
+                    detection_track[detection_index] = track
+                continue
+
+            self.apf_obstacle_track_candidates.append(
+                self.make_obstacle_track_candidate(
+                    detection_ne,
+                    now,
+                    pc1_m=pc1_m,
+                    pc2_m=pc2_m,
+                    length_axis_ne=length_axis_ne,
+                )
             )
-            self.apf_obstacle_tracks.append(track)
-            assigned_detections.add(detection_index)
-            detection_track[detection_index] = track
 
         for detection_index, track in detection_track.items():
             obstacle_index, _, _, _, _, _ = detections[detection_index]
             self.annotate_lidar_obstacle_with_track(self.lidar_obstacles[obstacle_index], track)
 
+        self.apf_obstacle_track_candidates = [
+            candidate
+            for candidate in self.apf_obstacle_track_candidates
+            if now - float(candidate.get("last_seen_s", candidate.get("stamp_s", now))) <= self.apf_track_timeout_s
+        ]
         self.prune_obstacle_tracks(now)
 
     def obstacle_track_visuals(self):

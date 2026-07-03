@@ -30,6 +30,11 @@ DEFAULT_OUTPUT_DIR = DEFAULT_LOGS_DIR / "generated_figures"
 DEFAULT_DISTANCE_OUTPUT_DIR = DEFAULT_OUTPUT_DIR / "webots_distance_groups"
 DEFAULT_SIZE_COMPARISON_OUTPUT_DIR = DEFAULT_OUTPUT_DIR / "pc_size_comparisons"
 
+WEBOTS_SHIP_DIMENSIONS_M = {
+    "Small": {"pc1_m": 0.95, "pc2_m": 0.32},
+    "Large": {"pc1_m": 1.90, "pc2_m": 0.528},
+}
+
 TIME_COLUMNS = ("TimeFromStart(s)", "TimeFromStart", "elapsed [s]")
 OWN_NORTH_COLUMNS = ("North(m)", "North", "x [m]")
 OWN_EAST_COLUMNS = ("East(m)", "East", "y [m]")
@@ -352,6 +357,31 @@ def plot_large_small_pc_pair(records, output_path):
             linewidth=1.8,
             label=f"{record.size_label} ship PC2",
         )
+
+        ship_dimensions = WEBOTS_SHIP_DIMENSIONS_M.get(record.size_label)
+        if ship_dimensions is not None:
+            ax.axhline(
+                ship_dimensions["pc1_m"],
+                color=color,
+                linestyle="-",
+                linewidth=1.1,
+                alpha=0.45,
+                label=(
+                    f"{record.size_label} ship actual PC1 = "
+                    f"{ship_dimensions['pc1_m']:.3f} m"
+                ),
+            )
+            ax.axhline(
+                ship_dimensions["pc2_m"],
+                color=color,
+                linestyle=":",
+                linewidth=1.1,
+                alpha=0.45,
+                label=(
+                    f"{record.size_label} ship actual PC2 = "
+                    f"{ship_dimensions['pc2_m']:.3f} m"
+                ),
+            )
 
     ax.set_title(
         "Principal Component Size over Time\n"

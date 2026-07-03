@@ -52,7 +52,7 @@ generate_papf_trajectory = _crossing.generate_papf_trajectory
 
 # Unified APF/EKF switch combinations. Change SWITCH_COMBINATION here, not in
 # the strategy source files.
-SWITCH_COMBINATION = os.environ.get("SWITCH_COMBINATION", "ekf_off_cluster_off")
+SWITCH_COMBINATION = os.environ.get("SWITCH_COMBINATION", "ekf_on_cluster_on")
 SWITCH_COMBINATIONS = {
     "ekf_on_cluster_on": (True, True),
     "ekf_on_cluster_off": (True, False),
@@ -65,10 +65,6 @@ if SWITCH_COMBINATION not in SWITCH_COMBINATIONS:
 # show_laptop.py compatibility: keep the public module-level switches.
 ENABLE_OBSTACLE_EKF_PREDICTION, ENABLE_CLUSTER_BASED_APF_RANGE = SWITCH_COMBINATIONS[SWITCH_COMBINATION]
 CLASSIC_APF_INFLUENCE_DISTANCE_M = 5.0
-_OVERTAKING_SPEED_WORLD_RE = re.compile(
-    r"_([0-9]+)_([0-9]+)_m_s(?:\.wbt)?$",
-    flags=re.IGNORECASE,
-)
 
 
 def _mode_value(robot_value, simulation_value):
@@ -191,13 +187,6 @@ def _detect_webots_environment(operating_mode):
     return "WEBOTS_UNKNOWN"
 
 
-def _overtaking_speed_from_world_name(world_name):
-    match = _OVERTAKING_SPEED_WORLD_RE.search(Path(str(world_name)).name)
-    if match is None:
-        return None
-    return float(f"{match.group(1)}.{match.group(2)}")
-
-
 def __getattr__(name):
     return getattr(_overtaking, name)
 
@@ -275,18 +264,6 @@ class LaptopController(_OvertakingController):
         self.apf_selected_controller = "default_apf"
         self._last_colreg_decision = None
         self.webots_environment = _detect_webots_environment(self.OPERATING_MODE)
-        if self.OPERATING_MODE == 2 and "overtaking" in self.webots_environment.lower():
-            self.overtaking_min_speed_m_s = 1.0
-            self.overtaking_speed_margin_m_s = 0.20
-            self.overtaking_deadline_safety_factor = 1.25
-            self.overtaking_obstacle_endpoint_progress_m = 10.0
-            self.overtaking_pass_clearance_m = 1.0
-            self.detected_obstacle_speed_m_s = _overtaking_speed_from_world_name(
-                self.webots_environment
-            )
-            self.detected_obstacle_progress_m = 2.0
-            self.v_max = np.inf
-            self._update_overtaking_speed_command()
         self._csv_context_last_patched_line_end = None
         self._ensure_csv_context_header()
         # Defaults used directly by laptop-crossing.py helpers when they run on
@@ -311,85 +288,8 @@ class LaptopController(_OvertakingController):
             0.18 if self.OPERATING_MODE == 2 else 0.16,
         )
 
-    def _update_overtaking_speed_command(self):
-        obstacle_speed = self.detected_obstacle_speed_m_s
-        if obstacle_speed is None or not np.isfinite(obstacle_speed) or obstacle_speed <= 0.0:
-            target_speed = self.overtaking_min_speed_m_s
-        else:
-            own_ne = np.array([self.North, self.East], dtype=float)
-            own_progress = float(np.dot(own_ne - self.start_ne, self.route_path_unit_ne))
-            remaining_obstacle_m = max(
-                self.overtaking_obstacle_endpoint_progress_m
-                - self.detected_obstacle_progress_m,
-                0.0,
-            )
-            remaining_time_s = remaining_obstacle_m / obstacle_speed
-            required_distance_m = max(
-                self.overtaking_obstacle_endpoint_progress_m
-                + self.overtaking_pass_clearance_m
-                - own_progress,
-                0.0,
-            )
-            deadline_speed = (
-                self.overtaking_deadline_safety_factor
-                * required_distance_m
-                / max(remaining_time_s, float(self.lastdt))
-            )
-            target_speed = max(
-                self.overtaking_min_speed_m_s,
-                obstacle_speed + self.overtaking_speed_margin_m_s,
-                deadline_speed,
-            )
-
-        self.route_tracking_speed_m_s = float(target_speed)
-        self.apf_constant_descent_speed_m_s = float(target_speed)
-        self.apf_overtaking_params["constant_descent_speed_m_s"] = float(target_speed)
-        self.v_max = np.inf
-
-    def _detect_overtaking_obstacle_motion(self):
-        route_unit = np.asarray(self.route_path_unit_ne, dtype=float).reshape(2)
-        current_ne = np.array([self.North, self.East], dtype=float)
-        candidates = []
-        for obstacle in self.lidar_obstacles:
-            centre_ne = np.asarray(
-                obstacle.get("centre_ne", [np.nan, np.nan]),
-                dtype=float,
-            ).reshape(2)
-            if not np.isfinite(centre_ne).all():
-                continue
-            relative_ne = centre_ne - current_ne
-            ahead_m = float(np.dot(relative_ne, route_unit))
-            lateral_m = abs(
-                float(route_unit[0] * relative_ne[1] - route_unit[1] * relative_ne[0])
-            )
-            if ahead_m >= -self.overtaking_pass_clearance_m:
-                candidates.append((lateral_m, ahead_m, centre_ne, obstacle))
-
-        if not candidates:
-            return
-
-        _, _, centre_ne, obstacle = min(candidates, key=lambda item: (item[0], item[1]))
-        self.detected_obstacle_progress_m = float(
-            np.dot(centre_ne - self.start_ne, route_unit)
-        )
-
-        if bool(obstacle.get("motion_stable", False)):
-            velocity_ne = np.asarray(
-                obstacle.get("velocity_mean_ne", [np.nan, np.nan]),
-                dtype=float,
-            ).reshape(2)
-            detected_speed = float(np.dot(velocity_ne, route_unit))
-            if np.isfinite(detected_speed) and detected_speed > 0.0:
-                self.detected_obstacle_speed_m_s = detected_speed
-
     def update_apf_obstacle_tracks(self, stamp_s):
         _OvertakingController.update_apf_obstacle_tracks(self, stamp_s)
-        if (
-            getattr(self, "OPERATING_MODE", None) == 2
-            and "overtaking" in str(getattr(self, "webots_environment", "")).lower()
-        ):
-            self._detect_overtaking_obstacle_motion()
-            self._update_overtaking_speed_command()
 
     def _run_context(self):
         return {
